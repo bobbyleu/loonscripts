@@ -1,6 +1,7 @@
 #!name = 京东CK自动获取与推送青龙面板
-#!desc = 获取京东CK，推送到青龙面板。
+#!desc = 获取京东CK，推送到青龙面板。（脚本版本 V1.14）
 #!author = @bobbyleu
+#!version = 1.14
 #!loon_version = 3.5.1(983)
 #!arguments-desc = CLIENT_ID/CLIENT_SECRET 为青龙开放授权密钥；推送青龙=获取到pt_key后强制推送到青龙；pt_key获取通知=关闭后半小时内只通知一次、否则即时通知；QL_URL 为青龙面板地址（必填）。
 
