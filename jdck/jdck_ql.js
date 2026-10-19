@@ -15,6 +15,7 @@
 //   V1.10 修正「有效性判定」误导（方案A，仅改文案、逻辑不动）：脚本只按 pt_key 字符串是否变化做去重，并不向京东校验 CK 是否真有效。把心跳通知中「仍有效」改为「pt_key未变化（脚本未校验京东侧有效性）」，消除误导
 //   V1.11 ① QL_URL 改为由 Loon 参数设置（参数QL_URL优先 + $persistentStore 兜底，默认留空、由用户自行填写，彻底移除预置地址）；② [Script] 的 script-path 改为指向 GitHub 公开 raw，Loon 自动拉取更新，无需手动粘贴脚本
 //   V1.12 ① 移除 QL_URL 默认值（插件参数留空、强制用户填写青龙地址，彻底去除文件内敏感地址）；② 推送改为「强制推送」：开启「推送青龙」即对每次捕获尝试推送（去除“同值永久跳过”去重，仅保留 30s 同key节流防突发）；③ 「未变化是否通知」重构为「pt_key获取通知」：开启=获取到pt_key即时通知（同key 1分钟限频防刷屏），关闭=半小时内只通知一次；④ 日志新增「pt_key是否发生变化 / 上次pt_key」；⑤ 插件 desc/author/开关说明同步更新
+//   V1.13 日志可读性增强（重试次数3/间隔2s保持不变）：① qlReq 重试/失败日志加「请求用途标签」（取token/查环境/更新pt_key/新建/启用/复核查询），一眼看清是哪一步在重试；② 推送成功日志与通知补充具体动作（已更新/已新建/已追加 env id），成功时不再丢失细节；③ 失败日志同样带步骤标签；④ 推送入口标注「含二次复核」、复核结果加「复核：」前缀，进度与结果更清晰
 //
 
 
@@ -35,7 +36,7 @@ var PUSH_GAP = 30 * 1000;                     // 同一 key 推送失败后的�
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
 var NOTIFY_NEW_GAP = 1 * 60 * 1000;            // 「pt_key获取通知」开启时：同一 key 1 分钟内只弹一次（防并发突发刷屏）
 var GET_NOTIFY_GAP = 30 * 60 * 1000;           // 「pt_key获取通知」关闭时：半小时内只通知一次
-var VERSION = "V1.12";
+var VERSION = "V1.13";
 
 // ========== 参数解析 ==========
 // Loon 3.5.x 的 [Argument] 占位式 argument=[{CLIENT_ID},{...}] 运行期会把 $argument
@@ -183,8 +184,9 @@ var QL_HTTP_TIMEOUT = 10000; // 单次 httpClient 超时（毫秒；Loon 单位�
 var QL_MAX_RETRY = 3;        // 网络错误最多尝试次数（含首次）。给瞬断/隧道抖动留余地：最多 3 次、2 次延迟重试
 var QL_RETRY_DELAY = 2000;   // 网络错误重试前的等待(毫秒)。立即连重试常撞上同一瞬断，等待 2s 让连接恢复再试
 var QL_HTTP_NODE = "DIRECT"; // 出站节点：DIRECT=直连(不经 Loon 代理)。青龙为公网域名时直连最快最稳；若你的网络必须走某节点才能访问，改成该节点名
-function qlReq(method, path, body, token, cb, _attempt) {
+function qlReq(method, path, body, token, cb, _attempt, _label) {
   _attempt = _attempt || 1;
+  var _lab = _label ? ("[" + _label + "] ") : "";
   var h = { "Content-Type": "application/json", "Accept": "application/json" };
   if (token) h["Authorization"] = "Bearer " + token;
   var opt = { url: QL_URL + path, headers: h, timeout: QL_HTTP_TIMEOUT, node: QL_HTTP_NODE };
@@ -203,52 +205,52 @@ function qlReq(method, path, body, token, cb, _attempt) {
       var netErr = /timeout|request failed|network|connection|ECONN|reset|refused|could not|unreachable/i.test(es);
       if (netErr && _attempt < QL_MAX_RETRY) {
         var _waitSec = (QL_RETRY_DELAY / 1000);
-        log("⏳ 网络错误（第" + _attempt + "次），等待 " + _waitSec + " 秒后进行第 " + (_attempt + 1) + " 次重试：" + clip(es, 100));
-        var _doRetry = function () { qlReq(method, path, body, token, cb, _attempt + 1); };
+        log("⏳ " + _lab + "网络错误（第" + _attempt + "次），等待 " + _waitSec + " 秒后进行第 " + (_attempt + 1) + " 次重试：" + clip(es, 100));
+        var _doRetry = function () { qlReq(method, path, body, token, cb, _attempt + 1, _label); };
         // 等待 QL_RETRY_DELAY 后再重试，让瞬断/隧道抖动恢复；环境无 setTimeout 则立即重试
         if (typeof setTimeout === "function") setTimeout(_doRetry, QL_RETRY_DELAY);
         else _doRetry();
         return;
       }
-      log("推送失败：网络错误 " + clip(es, 200));
+      log(_lab + "推送失败：网络错误 " + clip(es, 200));
       return cb("网络错误: " + es);
     }
     var status = (resp && resp.status) ? resp.status : ((resp && resp.statusCode) ? resp.statusCode : "?");
     var j;
     try { j = JSON.parse(data); }
-    catch (e) { log("推送失败：响应非JSON HTTP " + status + " " + clip(String(data), 200)); return cb("响应非JSON (HTTP " + status + ")"); }
+    catch (e) { log(_lab + "推送失败：响应非JSON HTTP " + status + " " + clip(String(data), 200)); return cb("响应非JSON (HTTP " + status + ")"); }
     if (!j || j.code !== 200) {
       var c = (j && j.code !== undefined) ? j.code : "undefined";
       var msg = (j && j.message !== undefined) ? (typeof j.message === "string" ? j.message : JSON.stringify(j.message)) : "";
       var cls = classifyQLFailure(status, data);
       var tag = cls ? " [CF_TUNNEL]" : "";
-      log("推送失败：青龙 HTTP " + status + " code=" + c + " message=" + msg + " " + clip(String(data), 200) + (cls ? ("\n  " + cls) : ""));
+      log(_lab + "推送失败：青龙 HTTP " + status + " code=" + c + " message=" + msg + " " + clip(String(data), 200) + (cls ? ("\n  " + cls) : ""));
       return cb("青龙错误 HTTP " + status + " code=" + c + " message=" + msg + tag);
     }
     cb(null, j.data);
   });
 }
 
-function getToken(cb) {
+function getToken(label, cb) {
   var p = "/open/auth/token?client_id=" + encodeURIComponent(QL_CLIENT_ID) + "&client_secret=" + encodeURIComponent(QL_CLIENT_SECRET);
   qlReq("GET", p, null, null, function (e, d) {
     if (e) return cb(e);
     if (!d || !d.token) return cb("token为空");
     cb(null, d.token);
-  });
+  }, 1, label || "取token");
 }
 
-function getEnvs(t, cb) {
+function getEnvs(label, t, cb) {
   qlReq("GET", "/open/envs?searchValue=JD_COOKIE&t=" + Date.now(), null, t, function (e, d) {
     if (e) return cb(e);
     cb(null, d && d.length ? d : []);
-  });
+  }, 1, label || "查环境");
 }
 
 // 推送后二次复核：重新拉取青龙 JD_COOKIE，确认最新 pt_key 确实已落地。
 // 直接回应“日志报失败、但青龙显示已更新”的歧义——给出确定的 ✅/⚠️ 结论。
 function verifyCK(t, pin, key, cb) {
-  getEnvs(t, function (e, envs) {
+  getEnvs("复核查询", t, function (e, envs) {
     if (e) return cb(false, "复核查询失败: " + e);
     var found = false;
     for (var i = 0; i < envs.length; i++) {
@@ -263,30 +265,31 @@ function verifyCK(t, pin, key, cb) {
 }
 
 /* PUT /open/envs 发送「单个对象」；个别版本若被拒则回退数组形式重试一次 */
-function updEnv(t, id, val, rm, cb) {
+function updEnv(label, t, id, val, rm, cb) {
   var obj = { id: id, name: "JD_COOKIE", value: val, remarks: rm || "" };
+  var _lab = label || "更新pt_key";
   qlReq("PUT", "/open/envs", obj, t, function (e) {
     if (!e) return cb(null);
     if (/Validation failed|code=undefined/i.test(String(e))) {
       return qlReq("PUT", "/open/envs", [obj], t, function (e2) {
         if (e2) return cb(e2);
         cb(null);
-      });
+      }, 1, _lab);
     }
     cb(e);
-  });
+  }, 1, _lab);
 }
 
-function newEnv(t, val, cb) {
+function newEnv(label, t, val, cb) {
   qlReq("POST", "/open/envs", [{ name: "JD_COOKIE", value: val, remarks: "Loon自动添加" }], t, function (e, d) {
     if (e) return cb(e, null);
     var nid = (d && d[0]) ? d[0].id : null;
     cb(null, nid);
-  });
+  }, 1, label || "新建环境");
 }
 
-function enableEnv(t, id) {
-  qlReq("PUT", "/open/envs/enable", [id], t, function (e) { if (e) log("推送失败：启用失败 " + e); });
+function enableEnv(label, t, id) {
+  qlReq("PUT", "/open/envs/enable", [id], t, function (e) { if (e) log("[" + (label || "启用环境") + "] 启用失败 " + e); }, 1, label || "启用环境");
 }
 
 function setKey(seg, key) {
@@ -295,18 +298,18 @@ function setKey(seg, key) {
 }
 
 function pushCK(pin, key, cb) {
-  getToken(function (e, tok) {
+  getToken("取token", function (e, tok) {
     if (e) return cb(false, "token失败: " + e);
-    getEnvs(tok, function (e2, envs) {
+    getEnvs("查环境", tok, function (e2, envs) {
       if (e2) return cb(false, "查询失败: " + e2);
       var jd = [];
       for (var i = 0; i < envs.length; i++) { if (envs[i] && envs[i].name === "JD_COOKIE") jd.push(envs[i]); }
 
       if (jd.length === 0) {
         var nv = "pt_key=" + key + ";pt_pin=" + encodeURIComponent(pin) + ";";
-        return newEnv(tok, nv, function (e3, nid) {
+        return newEnv("新建环境", tok, nv, function (e3, nid) {
           if (e3) return cb(false, "新建失败: " + e3);
-          if (nid) enableEnv(tok, nid);
+          if (nid) enableEnv("启用环境", tok, nid);
           cb(true, "已新建 JD_COOKIE");
         });
       }
@@ -320,9 +323,9 @@ function pushCK(pin, key, cb) {
             segs[s] = setKey(segs[s], key);
             var nv2 = segs.join("&");
             var id = env.id, st = env.status, rm = env.remarks;
-            return updEnv(tok, id, nv2, rm, function (e4) {
+            return updEnv("更新pt_key", tok, id, nv2, rm, function (e4) {
               if (e4) return cb(false, "更新失败: " + e4);
-              if (st !== undefined && st !== null && st !== 0) enableEnv(tok, id);
+              if (st !== undefined && st !== null && st !== 0) enableEnv("启用环境", tok, id);
               cb(true, "已更新 pt_key (env id=" + id + ")");
             });
           }
@@ -333,9 +336,9 @@ function pushCK(pin, key, cb) {
       var base = String(tgt.value || "").replace(/&+$/, "");
       var add = (base ? "&" : "") + "pt_key=" + key + ";pt_pin=" + encodeURIComponent(pin) + ";";
       var tid = tgt.id, tst = tgt.status, trm = tgt.remarks;
-      updEnv(tok, tid, base + add, trm, function (e5) {
+      updEnv("更新pt_key", tok, tid, base + add, trm, function (e5) {
         if (e5) return cb(false, "追加失败: " + e5);
-        if (tst !== undefined && tst !== null && tst !== 0) enableEnv(tok, tid);
+        if (tst !== undefined && tst !== null && tst !== 0) enableEnv("启用环境", tok, tid);
         cb(true, "已作为新账号追加");
       });
     });
@@ -447,20 +450,20 @@ function run() {
     finish(); return;
   }
 
-  log("开始推送到青龙面板。目标=" + hostOf(QL_URL) + " | 出站=" + QL_HTTP_NODE);
+  log("开始推送到青龙面板（含二次复核）。目标=" + hostOf(QL_URL) + " | 出站=" + QL_HTTP_NODE);
   pushCK(ptPin, ptKey, function (ok2, msg) {
     if (ok2) {
       setLastKey(ptPin, ptKey);
-      log("推送成功。");
+      log("推送成功：" + msg + "。");
       // 「推送成功」通知：每次真实推送成功都弹（推送本身已被 PUSH_GAP 限频，不会刷屏；
       // 成功后会写去重标记，同 key 后续请求走静默，不会重复弹）
       log("已发送「ck推送青龙成功」通知。");
-      notify("ck推送青龙成功", "pt_pin: " + ptPin, "pt_key: " + ptKey);
+      notify("ck推送青龙成功", "pt_pin: " + ptPin, msg + " | pt_key: " + ptKey);
       // 二次复核：重新拉取青龙确认最新 pt_key 已落地，消除“日志失败但青龙已更新”的歧义
-      getToken(function (e, tok) {
+      getToken("复核取token", function (e, tok) {
         if (e) { log("⚠️ 推送返回成功，但复核取 token 失败（" + e + "），无法二次确认；以青龙侧实际为准。"); return finish(); }
         verifyCK(tok, ptPin, ptKey, function (vf, vm) {
-          log(vf ? ("✅ " + vm) : ("⚠️ " + vm));
+          log((vf ? "✅ " : "⚠️ ") + "复核：" + vm);
           finish();
         });
       });
