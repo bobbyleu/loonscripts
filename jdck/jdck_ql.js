@@ -18,6 +18,7 @@
 //   V1.13 日志可读性增强（重试次数3/间隔2s保持不变）：① qlReq 重试/失败日志加「请求用途标签」（取token/查环境/更新pt_key/新建/启用/复核查询），一眼看清是哪一步在重试；② 推送成功日志与通知补充具体动作（已更新/已新建/已追加 env id），成功时不再丢失细节；③ 失败日志同样带步骤标签；④ 推送入口标注「含二次复核」、复核结果加「复核：」前缀，进度与结果更清晰
 //   V1.14 日志分组重构（重试3次/2s不变）：① 三段式分组日志「① 获取参数设置 / ② 获取CK / ③ 推送到青龙面板」，一眼看清进度；② 移除冗余的「青龙 CLIENT_ID/SECRET/URL」逐行解析输出（raw 已含完整凭证明文，足以核对），改以一行紧凑「设置摘要」呈现关键开关与地址；③ 把「pt_key是否发生变化」判断移至「② 获取CK」步骤内（紧随 pt_key 之后），不再与设置诊断混在一行；④ 推送入口去掉「（含二次复核）」括号，二次复核作为 ③ 末尾独立子步骤「二次复核：✅/⚠️」清晰呈现
 //   V1.15 日志形式再优化（重试3次/2s不变）：① 大步骤改用「1、2、3、」编号、子步骤用「- 」项目符号，层级更清晰；② 删除冗余的「参数 raw=」整行（设置摘要已清晰呈现开关/地址/凭证来源，不再重复输出完整参数）；③「② 获取CK」改名「2、获取CK」，子项改为「- 获取成功，pt_key为：xxx」「- 与上次相同/不同」；④「③ 推送到青龙面板」改名「3、推送到青龙面板」，各分支与成功/失败/二次复核均改为「- 」子项
+//   V1.16 细节打磨（重试3次/2s不变）：① 插件「最低Loon版本」字段改名为「版本」（#!版本=V1.16），作者字段改名「仓库」（#!仓库=仓库链接）；②「2、获取CK」将 pt_pin 合并进 pt_key 同一行，并把「获取成功」与「上次」均统一以「pt_key为：」表述；③「获取ck成功（即时通知）」等日志行从运行日志移除（避免刷屏），但 Loon 通知(notify)保留不变
 
 //
 
@@ -39,7 +40,7 @@ var PUSH_GAP = 30 * 1000;                     // 同一 key 推送失败后的�
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
 var NOTIFY_NEW_GAP = 1 * 60 * 1000;            // 「pt_key获取通知」开启时：同一 key 1 分钟内只弹一次（防并发突发刷屏）
 var GET_NOTIFY_GAP = 30 * 60 * 1000;           // 「pt_key获取通知」关闭时：半小时内只通知一次
-var VERSION = "V1.15";
+var VERSION = "V1.16";
 
 // ========== 参数解析 ==========
 // Loon 3.5.x 的 [Argument] 占位式 argument=[{CLIENT_ID},{...}] 运行期会把 $argument
@@ -356,22 +357,19 @@ function maybeNotifyGet(pin, key) {
     var _last = Number(sGet(K_NOTIFY + pin) || "0");
     var _lastKey = sGet(K_NOTIFY_KEY + pin);
     if (_lastKey === key && Date.now() - _last < NOTIFY_NEW_GAP) {
-      log("获取ck成功（即时模式·1分钟同key限频，已跳过弹窗），pt_pin：" + pin + "；pt_key: " + key + "。");
+      // 同 key 1 分钟内已通知过，跳过（不重复弹窗、也不打日志）
     } else {
       sSet(K_NOTIFY + pin, String(Date.now()));
       sSet(K_NOTIFY_KEY + pin, key);
       notify("获取ck成功", "pt_pin: " + pin, "pt_key: " + key);
-      log("获取ck成功（即时通知），pt_pin：" + pin + "；pt_key: " + key + "。");
     }
   } else {
     var _last2 = Number(sGet(K_NOTIFY + pin) || "0");
     if (Date.now() - _last2 >= GET_NOTIFY_GAP) {
       sSet(K_NOTIFY + pin, String(Date.now()));
       notify("获取ck成功", "pt_pin: " + pin, "pt_key: " + key);
-      log("获取ck成功（30分钟限频·本次通知），pt_pin：" + pin + "；pt_key: " + key + "。");
-    } else {
-      log("获取ck成功（30分钟限频·本次跳过弹窗），pt_pin：" + pin + "；pt_key: " + key + "。");
     }
+    // 30 分钟限频未到时静默跳过（不打日志）
   }
 }
 
@@ -411,9 +409,8 @@ function run() {
 
   // —— 2、获取CK ——
   log("2、获取CK");
-  log("  - 获取" + (ptKey ? "成功" : "失败") + "，pt_key为：" + ptKey);
-  log("  - " + (_changed ? "与上次不同" : "与上次相同") + (_changed ? "" : " | 上次=" + (_stored || "(无)")));
-  log("  - pt_pin=" + ptPin);
+  log("  - 获取成功，pt_key为：" + ptKey + " | pt_pin：" + ptPin);
+  log("  - 上次pt_key为：" + (_stored || "(无)") + (_changed ? "（与上次不同）" : "（与上次相同）"));
 
   // （已移除“pt_key未变化”心跳分支：开启「推送青龙」即对每次捕获强制推送，不再因同值而跳过）
 
