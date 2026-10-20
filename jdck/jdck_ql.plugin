@@ -2,7 +2,7 @@
 #!desc = 获取京东CK，推送到青龙面板。
 #!author = bobbyleu
 #!homepage = https://github.com/bobbyleu/loonscripts
-#!date = V1.31
+#!date = V1.32
 #!tag = 京东CK自动获取
 #!arguments-desc = CLIENT_ID/CLIENT_SECRET 为青龙开放授权密钥；推送青龙=获取到pt_key后强制推送到青龙；pt_key获取通知=关闭后半小时内只通知一次、否则即时通知；QL_URL 为青龙面板地址（必填）。
 
@@ -14,7 +14,7 @@ PUSH=switch,"true","false",tag=推送青龙, desc=获取到pt_key后强制推送
 NOTIFY_UNCHANGED=switch,"false","true",tag=pt_key获取通知, desc=关闭后，pt_key半小时内只通知一次；否则，获取到pt_key即时通知。
 
 [Script]
-http-request ^https?:\/\/api\.m\.jd\.com\/client\.action script-path=https://raw.githubusercontent.com/bobbyleu/loonscripts/main/jdck/jdck_ql.js,tag=京东CK自动获取与推送青龙面板,requires-body=false,timeout=60,enable=true,argument=[{CLIENT_ID},{CLIENT_SECRET},{PUSH},{NOTIFY_UNCHANGED},{QL_URL}]
+http-request ^https?:\/\/api\.m\.jd\.com\/client\.action.*functionId=logConfig script-path=https://raw.githubusercontent.com/bobbyleu/loonscripts/main/jdck/jdck_ql.js,tag=京东CK自动获取与推送青龙面板,requires-body=false,timeout=60,enable=true,argument=[{CLIENT_ID},{CLIENT_SECRET},{PUSH},{NOTIFY_UNCHANGED},{QL_URL}]
 
 [Mitm]
 hostname = %APPEND% api.m.jd.com
