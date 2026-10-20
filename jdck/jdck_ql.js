@@ -17,7 +17,7 @@ var CAPTURE_ONCE = true;                      // true=同一账号(pt_pin)推送
 var PUSH_GAP = 30 * 1000;                     // 同一 key 推送失败后的最小重试间隔(防高频)
 // （NOTIFY_OK_GAP 已移除：不再发送“pt_key未变”心跳通知；开启推送即强制推送）
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
-var VERSION = "V1.36";
+var VERSION = "V1.37";
 
 // ========== 参数解析 ==========
 // Loon 3.5.x 的 [Argument] 占位式 argument=[{CLIENT_ID},{...}] 运行期会把 $argument
@@ -345,13 +345,15 @@ function run() {
   var _stored = getLastKey(ptPin);
   var _changed = !!(ptKey && _stored !== ptKey);
 
-  // 当前版本
+  // 首行空行 + 当前版本
+  log("");
   log("当前版本：" + VERSION);
   log("");
 
-  // （1）获取CK
-  log("（1）开始获取CK。");
-  log("--获取CK成功，" + (_changed ? "CK已改变" : "与上次相同") + "，值：pt_key=" + ptKey + ",pt_pin=" + ptPin + "。");
+  // 1、获取CK
+  log("1、开始获取CK。");
+  log(_changed ? "- CK已改变" : "- 获取CK成功，与上次相同");
+  log("- CK值：pt_key=" + ptKey + ",pt_pin=" + ptPin + "。");
   log("");
 
   // （已移除“pt_key未变化”心跳分支：开启「推送青龙」即对每次捕获强制推送，不再因同值而跳过）
@@ -361,8 +363,9 @@ function run() {
 
   // 先判开关：推送青龙=关 → 仅抓取，不进入任何推送/限流逻辑（避免误报“限流”，也不污染节流计时）
   if (!ENABLE_PUSH) {
-    log("（2）推送CK至青龙面板");
-    log("  - 根据设置「推送青龙=关」，仅抓取 CK 不推送青龙。");
+    log("2、推送CK至青龙面板。");
+    log("- 根据设置「推送青龙=关」，仅抓取 CK 不推送青龙。");
+    log("");
     finish(); return;
   }
 
@@ -371,8 +374,9 @@ function run() {
   var _lastTryKey = sGet(K_TRYKEY + ptPin);
   var _lastTryT = Number(sGet(K_TRY) || "0");
   if (_lastTryKey === ptKey && Date.now() - _lastTryT < PUSH_GAP) {
-    log("（2）推送CK至青龙面板");
-    log("  - 推送节流（同key " + (PUSH_GAP / 1000) + "秒内已尝试，跳过本次；限频后仍将强制推送）。");
+    log("2、推送CK至青龙面板。");
+    log("- 推送节流（同key " + (PUSH_GAP / 1000) + "秒内已尝试，跳过本次；限频后仍将强制推送）。");
+    log("");
     finish(); return;
   }
   sSet(K_TRYKEY + ptPin, ptKey);
@@ -383,54 +387,58 @@ function run() {
     for (var i = 0; i < PT_PIN_WHITELIST.length; i++) {
       if (PT_PIN_WHITELIST[i] && dPin(String(PT_PIN_WHITELIST[i])) === ptPin) { ok = true; break; }
     }
-    if (!ok) { setLastKey(ptPin, ptKey); log("（2）推送CK至青龙面板"); log("  - pt_pin 不在白名单，跳过推送。"); finish(); return; }
+    if (!ok) { setLastKey(ptPin, ptKey); log("2、推送CK至青龙面板。"); log("- pt_pin 不在白名单，跳过推送。"); log(""); finish(); return; }
   }
 
   if (!QL_CLIENT_ID || !QL_CLIENT_SECRET) {
-    log("（2）推送CK至青龙面板");
-    log("  - 青龙凭证未配置，已终止推送。请在 Loon 参数填写 CLIENT_ID / CLIENT_SECRET");
+    log("2、推送CK至青龙面板。");
+    log("- 青龙凭证未配置，已终止推送。请在 Loon 参数填写 CLIENT_ID / CLIENT_SECRET");
     notify("京东Cookie未推送", "凭证未配置", "Loon脚本参数中填入 CLIENT_ID/CLIENT_SECRET");
+    log("");
     finish(); return;
   }
 
   if (!QL_URL) {
-    log("（2）推送CK至青龙面板");
-    log("  - 青龙地址(QL_URL)未填写，已终止推送。请在插件参数填写 QL_URL");
+    log("2、推送CK至青龙面板。");
+    log("- 青龙地址(QL_URL)未填写，已终止推送。请在插件参数填写 QL_URL");
     notify("京东Cookie未推送", "青龙地址未配置", "Loon插件参数中填入 QL_URL");
+    log("");
     finish(); return;
   }
 
-  log("（2）推送CK至青龙面板");
-  log("  - 开始推送（目标=" + hostOf(QL_URL) + " | 出站=" + QL_HTTP_NODE + "）");
+  log("2、推送CK至青龙面板。");
+  log("- 开始推送（目标=" + hostOf(QL_URL) + " | 出站=" + QL_HTTP_NODE + "）");
   pushCK(ptPin, ptKey, function (ok2, msg) {
     if (ok2) {
       setLastKey(ptPin, ptKey);
-      log("  - 推送结果：成功（" + msg + "）");
-      log("  - 已发送「ck推送青龙成功」通知。");
+      log("- 推送结果：成功（" + msg + "）");
+      log("- 已发送「ck推送青龙成功」通知。");
       notify("ck推送青龙成功", "pt_pin: " + ptPin, msg + " | pt_key: " + ptKey);
       // 二次复核：重新拉取青龙确认最新 pt_key 已落地，消除“日志失败但青龙已更新”的歧义
       getToken("复核取token", function (e, tok) {
-        if (e) { log("  - 二次复核：取 token 失败（" + e + "），无法确认；以青龙侧实际为准。"); return finish(); }
+        if (e) { log("- 二次复核：取 token 失败（" + e + "），无法确认；以青龙侧实际为准。"); log(""); return finish(); }
         verifyCK(tok, ptPin, ptKey, function (vf, vm) {
-          log("  - 二次复核：" + (vf ? "✅ " + vm : "⚠️ " + vm));
+          log("- 二次复核：" + (vf ? "✅ " + vm : "⚠️ " + vm));
+          log("");
           finish();
         });
       });
     } else {
       var _isCF = /\[CF_TUNNEL\]/.test(msg);
-      log("  - 推送结果：失败（" + msg + "）");
+      log("- 推送结果：失败（" + msg + "）");
       if (_isCF) {
-        log("  - 分类：青龙隧道/网关故障（与脚本无关）。CK 未送达青龙；隧道恢复后脚本会自动重试，无需改脚本。");
+        log("- 分类：青龙隧道/网关故障（与脚本无关）。CK 未送达青龙；隧道恢复后脚本会自动重试，无需改脚本。");
       } else {
-        log("  - 提示：网络超时可能是“请求已到达青龙并处理、响应未返回”，青龙侧可能已更新；本账号下次触发会自动重试。");
+        log("- 提示：网络超时可能是“请求已到达青龙并处理、响应未返回”，青龙侧可能已更新；本账号下次触发会自动重试。");
       }
       // 「推送失败」通知限频(10min)，持续失败时也不会刷屏
       var lastFail = Number(sGet(K_FAIL_NOTIFY) || "0");
       if (Date.now() - lastFail >= NOTIFY_FAIL_GAP) {
         sSet(K_FAIL_NOTIFY, String(Date.now()));
-        log("  - 已发送「ck推送青龙失败」通知(限频10min)。");
+        log("- 已发送「ck推送青龙失败」通知(限频10min)。");
         notify("ck推送青龙失败", "pt_pin: " + ptPin, _isCF ? "青龙隧道不可达(与脚本无关)" : msg);
       }
+      log("");
       finish();
     }
   });
