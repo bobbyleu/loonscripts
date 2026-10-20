@@ -20,7 +20,7 @@ var PUSH_GAP = 30 * 1000;                     // 同一 key 推送失败后的�
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
 var NOTIFY_NEW_GAP = 1 * 60 * 1000;            // 「pt_key获取通知」开启时：同一 key 1 分钟内只弹一次（防并发突发刷屏）
 var GET_NOTIFY_GAP = 30 * 60 * 1000;           // 「pt_key获取通知」关闭时：半小时内只通知一次
-var VERSION = "V1.27";
+var VERSION = "V1.28";
 
 // ========== 参数解析 ==========
 // Loon 3.5.x 的 [Argument] 占位式 argument=[{CLIENT_ID},{...}] 运行期会把 $argument
@@ -356,31 +356,6 @@ function maybeNotifyGet(pin, key) {
 function run() {
   var req = (typeof $request !== "undefined" && $request) ? $request : {};
 
-  // === 临时诊断 v1.27：打印 Loon 实际传给脚本的 $request 结构，定位为何取不到 pt_key ===
-  // 一旦任何请求里出现 pt_key，立即完整打印（不限频）——这是关键样本；否则每 3 秒采样一次结构。
-  (function () {
-    try {
-      var _s = "";
-      try { _s = JSON.stringify(req); } catch (e) { _s = "(not-serializable)"; }
-      var _has = _s.indexOf("pt_key") >= 0;
-      var _now = Date.now();
-      var _last = Number(sGet("JDCK_DIAG") || "0");
-      if (_has) {
-        log("DIAG-FOUND pt_key 出现在 $request！url=" + clip(req.url || "", 160));
-        log("DIAG-FOUND keys=" + Object.keys(req).join(","));
-        log("DIAG-FOUND headerKeys=" + (req.headers ? Object.keys(req.headers).join(",") : "(no headers)"));
-        log("DIAG-FOUND preview=" + clip(_s, 500));
-      } else if (_now - _last >= 3000) {
-        sSet("JDCK_DIAG", String(_now));
-        log("DIAG 无pt_key样本 | url=" + clip(req.url || "", 160));
-        log("DIAG keys=" + Object.keys(req).join(","));
-        log("DIAG headerKeys=" + (req.headers ? Object.keys(req.headers).join(",") : "(no headers)"));
-        log("DIAG preview=" + clip(_s, 300));
-      }
-    } catch (e) { log("DIAG err=" + e); }
-  })();
-  // === 诊断结束（定位完成后删除整段）===
-
   var headers = req.headers || {};
   var cookie = gH(headers, "Cookie");
   if (!cookie) { finish(); return; }
@@ -394,10 +369,6 @@ function run() {
   // 比对 pt_key 的值：仅用于日志展示「是否发生变化」，不再据此跳过推送（开启「推送青龙」即强制推送）
   var _stored = getLastKey(ptPin);
   var _changed = !!(ptKey && _stored !== ptKey);
-  var _first = !_stored;
-
-  // 去噪：pt_key 未变化且非首次捕获 → 静默返回，避免整域名匹配下每次 API 请求都刷日志/通知
-  if (!_changed && !_first) { finish(); return; }
 
   // 每次执行输出必要日志，便于确认脚本在跑、参数解析是否正确（分行显示，避免挤在一起）
   var _raw;
