@@ -26,6 +26,7 @@
 //   V1.21 回退为“先抓 api.m.jd.com/client.action?”（重试3次/2s不变）：用户要求先以宽泛口径抓到数据再一起看如何收窄，故 [Script] 正则改回 `^https?:\/\/api\.m\.jd\.com\/client\.action\?`（匹配该域下所有 client.action 接口，几乎覆盖 App 全部 API 请求，均携带登录 Cookie），[Mitm] hostname 同步退回仅 `api.m.jd.com`（移除 me-api/wq）。脚本去重/节流逻辑不变，不会因请求变多而刷屏；后续再据实测请求确定精准收窄目标。
 //   V1.22 修复 V1.21“零命中”根因（重试3次/2s不变）：V1.21 正则写成 `client\.action\?`（要求字面 `?` 紧跟 client.action），而 Loon 的 http-request 匹配在部分版本下只匹配“路径”不含查询串，导致 `client.action?` 永远对不上 → 脚本从不触发。本次去掉正则里的 `?`，改为前缀匹配 `^https?:\/\/api\.m\.jd\.com\/client\.action`（无论 url 是否带查询串都能命中），既保留“只抓 client.action”的意图，又消除该坑；[Mitm] hostname 仍为 `api.m.jd.com`。若重导后仍零命中，则转向排查 MITM（开关/证书信任/主机名列表）与插件是否真正加载。
 //   V1.23 先保证“能触发”（重试3次/2s不变）：经用户实测，`\/client\.action` 路径前缀在其实机 Loon 上对 api.m.jd.com 永远零命中（即便 MITM 正常、流量日志可见 api.m.jd.com 请求），故 [Script] 正则退回已验证可触发的整域名 `^https?:\/\/api\.m\.jd\.com`；并新增“未变化静默”机制（pt_key 未变且非首次即静默返回，仅首次/变化时打印 1/2/3 日志与推送）以解决整域名带来的刷屏；另加临时诊断 debugFn 采样命中请求的 functionId（节流2s），用于定位“我的”页对应接口，后续据实测 functionId 精准收窄正则。
+//   V1.24 触发定位诊断（重试3次/2s不变）：用户重导 V1.23 后仍“完全无反应、连 DEBUG 日志都没有”——因 debugFn 在静默门控之前调用，故无任何 DEBUG 即证明脚本未被触发（非刷屏问题）。新增“触发诊断通知”：run() 最顶部对每次触发弹「JDCK诊断 脚本已触发」通知（10s 限频），用于一锤定音区分“触发正常(下游问题)”与“脚本根本没跑(MITM未解密/未加载/未启用/正则不匹配)”。定位完成后删除本段与 debugFn，并据实测 functionId 收敛正则。
 
 //
 
@@ -47,7 +48,7 @@ var PUSH_GAP = 30 * 1000;                     // 同一 key 推送失败后的�
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
 var NOTIFY_NEW_GAP = 1 * 60 * 1000;            // 「pt_key获取通知」开启时：同一 key 1 分钟内只弹一次（防并发突发刷屏）
 var GET_NOTIFY_GAP = 30 * 60 * 1000;           // 「pt_key获取通知」关闭时：半小时内只通知一次
-var VERSION = "V1.23";
+var VERSION = "V1.24";
 
 // ========== 参数解析 ==========
 // Loon 3.5.x 的 [Argument] 占位式 argument=[{CLIENT_ID},{...}] 运行期会把 $argument
@@ -399,6 +400,23 @@ function debugFn(req) {
 
 function run() {
   var req = (typeof $request !== "undefined" && $request) ? $request : {};
+
+  // —— 临时诊断：确认脚本是否被触发（定位完成后删除本段）——
+  // 只要本脚本被 Loon 命中并执行，就会弹「JDCK诊断 脚本已触发」通知（10s 限频，不刷屏）。
+  // 若打开京东后始终收不到此通知，说明脚本根本没被调用（MITM 未解密/未加载/未启用/正则不匹配），
+  // 与刷屏无关；此时请按排查清单检查 MITM 主机名列表、证书信任与脚本启用状态。
+  (function () {
+    try {
+      var _now = Date.now();
+      var _last = Number(sGet("JDCK_TESTNTF") || "0");
+      if (_now - _last >= 10000) {
+        sSet("JDCK_TESTNTF", String(_now));
+        var _u = (req && req.url) ? req.url : "(无url)";
+        notify("JDCK诊断", "脚本已触发", "url=" + clip(_u, 90));
+      }
+    } catch (e) {}
+  })();
+
   var headers = req.headers || {};
   var cookie = gH(headers, "Cookie");
   if (!cookie) { finish(); return; }
