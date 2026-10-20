@@ -1,5 +1,5 @@
 // 京东CK自动获取与推送青龙面板
-// 拦截 api.m.jd.com 上 client.action 接口（携带登录 Cookie），捕获 pt_key/pt_pin，按 pt_pin 匹配青龙 JD_COOKIE 并自动更新 pt_key。
+// 拦截 api.m.jd.com，捕获 pt_key/pt_pin，按 pt_pin 匹配青龙 JD_COOKIE 并自动更新 pt_key。
 //
 // ===== 版本变更记录 =====
 //   V1.0  改名 + 参数面板([Argument]) + 必要日志；parseArgs 兼容「命名式 key=value」与「占位式逗号列表」
@@ -21,12 +21,6 @@
 //   V1.16 细节打磨（重试3次/2s不变）：① 插件「最低Loon版本」字段改名为「版本」（#!版本=V1.16），作者字段改名「仓库」（#!仓库=仓库链接）；②「2、获取CK」将 pt_pin 合并进 pt_key 同一行，并把「获取成功」与「上次」均统一以「pt_key为：」表述；③「获取ck成功（即时通知）」等日志行从运行日志移除（避免刷屏），但 Loon 通知(notify)保留不变
 //   V1.17 插件元数据改用 Loon 标准字段以在详情页真实显示（重试3次/2s不变）：① 移除 Loon 不识别的自定义 `#!版本`/`#!仓库`（自定义字段被 Loon 忽略，故详情页看不到）；② 仓库链接改用标准 `#!homepage`（详情页可点击跳转）；③ 版本号以 `#!tag`（如 V1.17）徽标 + `#!desc` 内「当前版本 V1.17」双处呈现；④ 新增 `#!author = bobbyleu`
 //   V1.18 版本号单独成行显示（重试3次/2s不变）：Loon 无专用“版本”字段，新增官方用于承载版本号、且按原样显示的 `#!date = V1.18`，使其像“主页/作者”一样在详情页独立成行；desc 去掉版本句子（版本改由 date 行呈现）；tag 仅保留分类
-//   V1.19 拦截精准化（重试3次/2s不变）：[Script] 的 http-request 正则由宽泛的 `^https?:\/\/api\.m\.jd\.com` 收窄为仅匹配 `client.action?functionId=signBean`（领京豆/签到）与 `user_new/info/GetJDUserInfoUnion`（打开“我的”个人页）两个携带登录 Cookie 的接口；脚本仍从请求头 Cookie 读取 pt_key，逻辑不变，仅触发次数大幅减少（MitM hostname 不变）。
-//   V1.20 修复“打开我的无触发”根因（重试3次/2s不变）：京东“我的”个人页实际请求的是 `wq.jd.com/user_new/info/GetJDUserInfoUnion` 或 `me-api.jd.com/user_new/info/GetJDUserInfoUnion`（社区公认打开个人中心即触发的抓CK接口），而此前 MITM 与正则只覆盖 `api.m.jd.com`，故该请求既未被解密也未被命中。本次：① [Mitm] hostname 由 `api.m.jd.com` 扩展为 `api.m.jd.com, me-api.jd.com, wq.jd.com`（%APPEND% 追加，不覆盖全局）；② [Script] 正则主机段由 `api\.m` 扩展为 `(api\.m|me-api|wq)`，路径 `user_new/info/GetJDUserInfoUnion` 三域名通用；③ 保留 `client.action?functionId=signBean` 作为领京豆/签到触发。脚本仍从请求头 Cookie 读取 pt_key，逻辑不变。
-//   V1.21 回退为“先抓 api.m.jd.com/client.action?”（重试3次/2s不变）：用户要求先以宽泛口径抓到数据再一起看如何收窄，故 [Script] 正则改回 `^https?:\/\/api\.m\.jd\.com\/client\.action\?`（匹配该域下所有 client.action 接口，几乎覆盖 App 全部 API 请求，均携带登录 Cookie），[Mitm] hostname 同步退回仅 `api.m.jd.com`（移除 me-api/wq）。脚本去重/节流逻辑不变，不会因请求变多而刷屏；后续再据实测请求确定精准收窄目标。
-//   V1.22 修复 V1.21“零命中”根因（重试3次/2s不变）：V1.21 正则写成 `client\.action\?`（要求字面 `?` 紧跟 client.action），而 Loon 的 http-request 匹配在部分版本下只匹配“路径”不含查询串，导致 `client.action?` 永远对不上 → 脚本从不触发。本次去掉正则里的 `?`，改为前缀匹配 `^https?:\/\/api\.m\.jd\.com\/client\.action`（无论 url 是否带查询串都能命中），既保留“只抓 client.action”的意图，又消除该坑；[Mitm] hostname 仍为 `api.m.jd.com`。若重导后仍零命中，则转向排查 MITM（开关/证书信任/主机名列表）与插件是否真正加载。
-//   V1.23 先保证“能触发”（重试3次/2s不变）：经用户实测，`\/client\.action` 路径前缀在其实机 Loon 上对 api.m.jd.com 永远零命中（即便 MITM 正常、流量日志可见 api.m.jd.com 请求），故 [Script] 正则退回已验证可触发的整域名 `^https?:\/\/api\.m\.jd\.com`；并新增“未变化静默”机制（pt_key 未变且非首次即静默返回，仅首次/变化时打印 1/2/3 日志与推送）以解决整域名带来的刷屏；另加临时诊断 debugFn 采样命中请求的 functionId（节流2s），用于定位“我的”页对应接口，后续据实测 functionId 精准收窄正则。
-//   V1.24 触发定位诊断（重试3次/2s不变）：用户重导 V1.23 后仍“完全无反应、连 DEBUG 日志都没有”——因 debugFn 在静默门控之前调用，故无任何 DEBUG 即证明脚本未被触发（非刷屏问题）。新增“触发诊断通知”：run() 最顶部对每次触发弹「JDCK诊断 脚本已触发」通知（10s 限频），用于一锤定音区分“触发正常(下游问题)”与“脚本根本没跑(MITM未解密/未加载/未启用/正则不匹配)”。定位完成后删除本段与 debugFn，并据实测 functionId 收敛正则。
 
 //
 
@@ -48,7 +42,7 @@ var PUSH_GAP = 30 * 1000;                     // 同一 key 推送失败后的�
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
 var NOTIFY_NEW_GAP = 1 * 60 * 1000;            // 「pt_key获取通知」开启时：同一 key 1 分钟内只弹一次（防并发突发刷屏）
 var GET_NOTIFY_GAP = 30 * 60 * 1000;           // 「pt_key获取通知」关闭时：半小时内只通知一次
-var VERSION = "V1.24";
+var VERSION = "V1.18";
 
 // ========== 参数解析 ==========
 // Loon 3.5.x 的 [Argument] 占位式 argument=[{CLIENT_ID},{...}] 运行期会把 $argument
@@ -381,42 +375,8 @@ function maybeNotifyGet(pin, key) {
   }
 }
 
-// 临时诊断：采样命中请求的 functionId（节流2s），用于定位“我的”页对应的接口。
-// 定位完成后，可删除本函数及其调用（run() 中的 debugFn(req) 一行），并据实测 functionId 精准收窄正则。
-function debugFn(req) {
-  try {
-    var u = (req && req.url) ? req.url : "";
-    var fm = u.match(/[?&]functionId=([^&\s]+)/);
-    if (!fm) return;
-    var fid = decodeURIComponent(fm[1]);
-    var last = sGet("JDCK_DBGFN");
-    var now = Date.now();
-    var p = (last || "").split("|");
-    if (p[0] === fid && (now - Number(p[1] || 0)) < 2000) return;
-    sSet("JDCK_DBGFN", fid + "|" + now);
-    log("DEBUG 接口 functionId=" + fid);
-  } catch (e) {}
-}
-
 function run() {
   var req = (typeof $request !== "undefined" && $request) ? $request : {};
-
-  // —— 临时诊断：确认脚本是否被触发（定位完成后删除本段）——
-  // 只要本脚本被 Loon 命中并执行，就会弹「JDCK诊断 脚本已触发」通知（10s 限频，不刷屏）。
-  // 若打开京东后始终收不到此通知，说明脚本根本没被调用（MITM 未解密/未加载/未启用/正则不匹配），
-  // 与刷屏无关；此时请按排查清单检查 MITM 主机名列表、证书信任与脚本启用状态。
-  (function () {
-    try {
-      var _now = Date.now();
-      var _last = Number(sGet("JDCK_TESTNTF") || "0");
-      if (_now - _last >= 10000) {
-        sSet("JDCK_TESTNTF", String(_now));
-        var _u = (req && req.url) ? req.url : "(无url)";
-        notify("JDCK诊断", "脚本已触发", "url=" + clip(_u, 90));
-      }
-    } catch (e) {}
-  })();
-
   var headers = req.headers || {};
   var cookie = gH(headers, "Cookie");
   if (!cookie) { finish(); return; }
@@ -430,13 +390,6 @@ function run() {
   // 比对 pt_key 的值：仅用于日志展示「是否发生变化」，不再据此跳过推送（开启「推送青龙」即强制推送）
   var _stored = getLastKey(ptPin);
   var _changed = !!(ptKey && _stored !== ptKey);
-  var _first = !_stored;
-
-  // 临时诊断：采样命中接口的 functionId（定位“我的”页对应接口用；不影响主流程）
-  debugFn(req);
-
-  // 去噪：pt_key 未变化且非首次捕获 → 静默返回，避免整域名匹配下每次 API 请求都刷日志/通知
-  if (!_changed && !_first) { finish(); return; }
 
   // 每次执行输出必要日志，便于确认脚本在跑、参数解析是否正确（分行显示，避免挤在一起）
   var _raw;
