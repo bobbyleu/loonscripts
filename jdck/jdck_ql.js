@@ -1,13 +1,12 @@
-// 京东CK自动获取与推送青龙面板
+// 京东CK自动推送青龙面板
 // 拦截 api.m.jd.com 上携带登录 Cookie 的请求，捕获 pt_key/pt_pin，按 pt_pin 匹配青龙 JD_COOKIE 并自动更新 pt_key。
 //
 
 
 // 参数通过 Loon 插件「参数面板」设置（导入后在 Loon → 脚本 → 点开本脚本 → 参数 中可见）：
-//   CLIENT_ID / CLIENT_SECRET : 青龙「系统设置-应用设置-开放授权」密钥
+//   CLIENT_ID / CLIENT_SECRET : 青龙面板「系统设置-应用设置-开放授权」密钥
 //   QL_URL                   : 青龙面板地址（**无默认值，必须由用户在插件参数填写**，如 https://your-domain.com）
 //   PUSH                     : 强制推送青龙（true=每次捕获都推送 / false=仅抓取不推送）
-//   NOTIFY_UNCHANGED         : pt_key 获取通知开关（true=即时通知 / false=半小时内只通知一次；插件参数名仍为 NOTIFY_UNCHANGED）
 // 兼容 $persistentStore 兜底。
 
 // ========== 配置区（一般无需改动）==========
@@ -18,13 +17,11 @@ var CAPTURE_ONCE = true;                      // true=同一账号(pt_pin)推送
 var PUSH_GAP = 30 * 1000;                     // 同一 key 推送失败后的最小重试间隔(防高频)
 // （NOTIFY_OK_GAP 已移除：不再发送“pt_key未变”心跳通知；开启推送即强制推送）
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
-var NOTIFY_NEW_GAP = 1 * 60 * 1000;            // 「pt_key获取通知」开启时：同一 key 1 分钟内只弹一次（防并发突发刷屏）
-var GET_NOTIFY_GAP = 30 * 60 * 1000;           // 「pt_key获取通知」关闭时：半小时内只通知一次
-var VERSION = "V1.34";
+var VERSION = "V1.35";
 
 // ========== 参数解析 ==========
 // Loon 3.5.x 的 [Argument] 占位式 argument=[{CLIENT_ID},{...}] 运行期会把 $argument
-// 直接传成「原生 JS 对象」{CLIENT_ID:"...", CLIENT_SECRET:"...", PUSH:"...", NOTIFY_UNCHANGED:"..."}，
+// 直接传成「原生 JS 对象」{CLIENT_ID:"...", CLIENT_SECRET:"...", PUSH:"...", QL_URL:"..."}，
 // 也可能传成「数组」或「JSON 字符串」。本函数同时兼容这几种 + 手动命名式(CLIENT_ID=x&...)。
 var _ARGS = null;
 function parseArgs() {
@@ -36,7 +33,7 @@ function parseArgs() {
   function absorb(o) {
     if (!o || typeof o !== "object") return;
     if (Array.isArray(o)) {
-      var names = ["CLIENT_ID", "CLIENT_SECRET", "PUSH", "NOTIFY_UNCHANGED"];
+      var names = ["CLIENT_ID", "CLIENT_SECRET", "PUSH", "QL_URL"];
       o.forEach(function (v, idx) {
         if (names[idx] && v !== undefined && v !== null) map[names[idx]] = String(v).trim();
       });
@@ -72,7 +69,7 @@ function parseArgs() {
         });
       } else if (s) {
         // 逗号占位式 id,secret,true,false
-        var names2 = ["CLIENT_ID", "CLIENT_SECRET", "PUSH", "NOTIFY_UNCHANGED"];
+        var names2 = ["CLIENT_ID", "CLIENT_SECRET", "PUSH", "QL_URL"];
         s.split(",").forEach(function (v, idx) {
           v = v.trim();
           if (/^\{.*\}$/.test(v)) return; // 未替换的占位符，跳过
@@ -118,7 +115,6 @@ QL_URL = _argUrl ? _argUrl : (sGet("JDCK_URL") || QL_URL);
 if (_argUrl) sSet("JDCK_URL", _argUrl);
 
 var ENABLE_PUSH = parseBool(getArg("PUSH", "true"), true);
-var NOTIFY_GET = parseBool(getArg("NOTIFY_UNCHANGED", "false"), false); // 插件参数名仍为 NOTIFY_UNCHANGED；语义：获取到pt_key后的通知策略（true=即时通知 / false=30分钟仅一次）
 
 // ========== 持久化键 ==========
 // 按 pt_key 值去重：记录每个 pt_pin 上次已推送的 pt_key 值，
@@ -130,8 +126,6 @@ function setLastKey(pin, key) { sSet(lastKeyStore(pin), key); }
 var K_SEEN = "JDCK_SEEN_";           // 早期去重：上次“已见”的 pt_key（捕获即写，压制并发突发）
 function getSeen(pin) { return sGet(K_SEEN + pin); }
 function setSeen(pin, key) { sSet(K_SEEN + pin, key); }
-var K_NOTIFY = "JDCK_NOTIFY_";       // 上次「获取ck成功」通知时间（1min 时限兜底）
-var K_NOTIFY_KEY = "JDCK_NOTIFYKEY_"; // 上次「获取ck成功」通知的 pt_key 值（仅同值才限频）
 var K_NOTIFY_OK = "JDCK_NOTIFYOK_";  // 上次「推送成功」通知时间（1min 时限兜底）
 var K_NOTIFY_OK_KEY = "JDCK_NOTIFYOKKEY_"; // 上次「推送成功」通知的 pt_key 值（仅同值才限频）
 var K_FAIL_NOTIFY = "JDCK_FAILNOTIFY"; // 上次「推送失败」通知时间
@@ -329,28 +323,9 @@ function pushCK(pin, key, cb) {
   });
 }
 
-// 获取到 pt_key 后的通知策略（由「pt_key获取通知」开关控制）
-//   开启 → 即时通知：同一 pt_key 在 1 分钟内只弹一次，避免京东 App 一次触发多条请求导致刷屏
-//   关闭 → 半小时内只通知一次
+// 获取到 pt_key 后：检测到就通知（不再做通知频率控制）
 function maybeNotifyGet(pin, key) {
-  if (NOTIFY_GET) {
-    var _last = Number(sGet(K_NOTIFY + pin) || "0");
-    var _lastKey = sGet(K_NOTIFY_KEY + pin);
-    if (_lastKey === key && Date.now() - _last < NOTIFY_NEW_GAP) {
-      // 同 key 1 分钟内已通知过，跳过（不重复弹窗、也不打日志）
-    } else {
-      sSet(K_NOTIFY + pin, String(Date.now()));
-      sSet(K_NOTIFY_KEY + pin, key);
-      notify("获取ck成功", "pt_pin: " + pin, "pt_key: " + key);
-    }
-  } else {
-    var _last2 = Number(sGet(K_NOTIFY + pin) || "0");
-    if (Date.now() - _last2 >= GET_NOTIFY_GAP) {
-      sSet(K_NOTIFY + pin, String(Date.now()));
-      notify("获取ck成功", "pt_pin: " + pin, "pt_key: " + key);
-    }
-    // 30 分钟限频未到时静默跳过（不打日志）
-  }
+  notify("获取ck成功", "pt_pin: " + pin, "pt_key: " + key);
 }
 
 function run() {
@@ -382,7 +357,7 @@ function run() {
   log("运行 | 版本=" + VERSION);
   // —— 1、获取参数设置 ——
   log("1、获取参数设置");
-  log("  推送青龙=" + (ENABLE_PUSH ? "开(强制)" : "关") + " | pt_key获取通知=" + (NOTIFY_GET ? "开" : "关(30min仅一次)") + " | 青龙地址=" + (QL_URL || "(未填写!)") + " | 凭证来源=" + _credSrc);
+  log("  推送青龙=" + (ENABLE_PUSH ? "开(强制)" : "关") + " | 青龙地址=" + (QL_URL || "(未填写!)") + " | 凭证来源=" + _credSrc);
   // 占位符未替换检测：仅在异常时打印 raw（正常情况不再重复输出完整参数/密钥）
   if (_raw.indexOf("{CLIENT_ID}") >= 0 || _raw.indexOf("{PUSH}") >= 0 || _raw.indexOf("{QL_URL}") >= 0) {
     log("  ⚠️ 参数未被 Loon 替换（仍含 {CLIENT_ID}/{PUSH}/{QL_URL} 等占位符），很可能运行的是旧的脚本条目。请在 Loon 删除旧的「京东CK」脚本、重新导入 jdck_ql.plugin。");
@@ -395,7 +370,7 @@ function run() {
 
   // （已移除“pt_key未变化”心跳分支：开启「推送青龙」即对每次捕获强制推送，不再因同值而跳过）
 
-  // 获取到 pt_key 的通知：由「pt_key获取通知」开关控制（开启=即时通知，关闭=30分钟仅一次）
+  // 获取到 pt_key 的通知：检测到就通知（不做频率控制）
   maybeNotifyGet(ptPin, ptKey);
 
   // 先判开关：推送青龙=关 → 仅抓取，不进入任何推送/限流逻辑（避免误报“限流”，也不污染节流计时）
