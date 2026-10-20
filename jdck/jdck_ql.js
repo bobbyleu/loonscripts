@@ -1,5 +1,5 @@
 // 京东CK自动获取与推送青龙面板
-// 拦截 api.m.jd.com，捕获 pt_key/pt_pin，按 pt_pin 匹配青龙 JD_COOKIE 并自动更新 pt_key。
+// 拦截 api.m.jd.com / me-api.jd.com / wq.jd.com 上携带登录 Cookie 的接口，捕获 pt_key/pt_pin，按 pt_pin 匹配青龙 JD_COOKIE 并自动更新 pt_key。
 //
 // ===== 版本变更记录 =====
 //   V1.0  改名 + 参数面板([Argument]) + 必要日志；parseArgs 兼容「命名式 key=value」与「占位式逗号列表」
@@ -22,6 +22,7 @@
 //   V1.17 插件元数据改用 Loon 标准字段以在详情页真实显示（重试3次/2s不变）：① 移除 Loon 不识别的自定义 `#!版本`/`#!仓库`（自定义字段被 Loon 忽略，故详情页看不到）；② 仓库链接改用标准 `#!homepage`（详情页可点击跳转）；③ 版本号以 `#!tag`（如 V1.17）徽标 + `#!desc` 内「当前版本 V1.17」双处呈现；④ 新增 `#!author = bobbyleu`
 //   V1.18 版本号单独成行显示（重试3次/2s不变）：Loon 无专用“版本”字段，新增官方用于承载版本号、且按原样显示的 `#!date = V1.18`，使其像“主页/作者”一样在详情页独立成行；desc 去掉版本句子（版本改由 date 行呈现）；tag 仅保留分类
 //   V1.19 拦截精准化（重试3次/2s不变）：[Script] 的 http-request 正则由宽泛的 `^https?:\/\/api\.m\.jd\.com` 收窄为仅匹配 `client.action?functionId=signBean`（领京豆/签到）与 `user_new/info/GetJDUserInfoUnion`（打开“我的”个人页）两个携带登录 Cookie 的接口；脚本仍从请求头 Cookie 读取 pt_key，逻辑不变，仅触发次数大幅减少（MitM hostname 不变）。
+//   V1.20 修复“打开我的无触发”根因（重试3次/2s不变）：京东“我的”个人页实际请求的是 `wq.jd.com/user_new/info/GetJDUserInfoUnion` 或 `me-api.jd.com/user_new/info/GetJDUserInfoUnion`（社区公认打开个人中心即触发的抓CK接口），而此前 MITM 与正则只覆盖 `api.m.jd.com`，故该请求既未被解密也未被命中。本次：① [Mitm] hostname 由 `api.m.jd.com` 扩展为 `api.m.jd.com, me-api.jd.com, wq.jd.com`（%APPEND% 追加，不覆盖全局）；② [Script] 正则主机段由 `api\.m` 扩展为 `(api\.m|me-api|wq)`，路径 `user_new/info/GetJDUserInfoUnion` 三域名通用；③ 保留 `client.action?functionId=signBean` 作为领京豆/签到触发。脚本仍从请求头 Cookie 读取 pt_key，逻辑不变。
 
 //
 
@@ -43,7 +44,7 @@ var PUSH_GAP = 30 * 1000;                     // 同一 key 推送失败后的�
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
 var NOTIFY_NEW_GAP = 1 * 60 * 1000;            // 「pt_key获取通知」开启时：同一 key 1 分钟内只弹一次（防并发突发刷屏）
 var GET_NOTIFY_GAP = 30 * 60 * 1000;           // 「pt_key获取通知」关闭时：半小时内只通知一次
-var VERSION = "V1.19";
+var VERSION = "V1.20";
 
 // ========== 参数解析 ==========
 // Loon 3.5.x 的 [Argument] 占位式 argument=[{CLIENT_ID},{...}] 运行期会把 $argument
