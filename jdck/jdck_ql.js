@@ -135,7 +135,7 @@ var K_TRYKEY = "JDCK_TRYKEY_";         // 上次尝试推送的 key（前缀，�
 // ========== 工具 ==========
 function clip(s, n) { s = (s === undefined || s === null) ? "" : String(s); return s.length > n ? s.slice(0, n) + "…" : s; }
 function hostOf(u) { var m = String(u || "").match(/^https?:\/\/([^\/?#]+)/); return m ? m[1] : String(u || ""); }
-function log(m) { try { console.log("[JDCK " + VERSION + "] " + m); } catch (e) {} }
+function log(m) { try { console.log(m); } catch (e) {} }
 function notify(t, s, b) { try { $notification.post(t || "", s || "", b || ""); } catch (e) {} }
 function finish() { try { $done({}); } catch (e) {} }
 function gH(h, n) {
@@ -345,28 +345,13 @@ function run() {
   var _stored = getLastKey(ptPin);
   var _changed = !!(ptKey && _stored !== ptKey);
 
-  // 每次执行输出必要日志，便于确认脚本在跑、参数解析是否正确（分行显示，避免挤在一起）
-  var _raw;
-  if (typeof $argument === "object" && $argument) {
-    try { _raw = "Object:" + JSON.stringify($argument); } catch (e) { _raw = "[object]"; }
-  } else if (typeof $argument === "string") {
-    _raw = $argument;
-  } else {
-    _raw = "(空)";
-  }
-  log("运行 | 版本=" + VERSION);
-  // —— 1、获取参数设置 ——
-  log("1、获取参数设置");
-  log("  推送青龙=" + (ENABLE_PUSH ? "开(强制)" : "关") + " | 青龙地址=" + (QL_URL || "(未填写!)") + " | 凭证来源=" + _credSrc);
-  // 占位符未替换检测：仅在异常时打印 raw（正常情况不再重复输出完整参数/密钥）
-  if (_raw.indexOf("{CLIENT_ID}") >= 0 || _raw.indexOf("{PUSH}") >= 0 || _raw.indexOf("{QL_URL}") >= 0) {
-    log("  ⚠️ 参数未被 Loon 替换（仍含 {CLIENT_ID}/{PUSH}/{QL_URL} 等占位符），很可能运行的是旧的脚本条目。请在 Loon 删除旧的「京东CK」脚本、重新导入 jdck_ql.plugin。");
-  }
+  // 当前版本
+  log("当前版本：" + VERSION);
 
-  // —— 2、获取CK ——
-  log("2、获取CK");
-  log("  - 获取成功，pt_key为：" + ptKey + " | pt_pin：" + ptPin);
-  log("  - 上次pt_key为：" + (_stored || "(无)") + (_changed ? "（与上次不同）" : "（与上次相同）"));
+  // 获取CK
+  log("开始获取CK……");
+  log("--当前CK获取成功，具体为：pt_key=" + ptKey + " | pt_pin=" + ptPin);
+  log(_changed ? "--CK已发生变化。" : "--与上次CK相同。");
 
   // （已移除“pt_key未变化”心跳分支：开启「推送青龙」即对每次捕获强制推送，不再因同值而跳过）
 
