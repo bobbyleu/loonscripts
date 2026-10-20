@@ -20,7 +20,7 @@ var PUSH_GAP = 30 * 1000;                     // 同一 key 推送失败后的�
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
 var NOTIFY_NEW_GAP = 1 * 60 * 1000;            // 「pt_key获取通知」开启时：同一 key 1 分钟内只弹一次（防并发突发刷屏）
 var GET_NOTIFY_GAP = 30 * 60 * 1000;           // 「pt_key获取通知」关闭时：半小时内只通知一次
-var VERSION = "V1.31";
+var VERSION = "V1.32";
 
 // ========== 参数解析 ==========
 // Loon 3.5.x 的 [Argument] 占位式 argument=[{CLIENT_ID},{...}] 运行期会把 $argument
@@ -356,9 +356,10 @@ function maybeNotifyGet(pin, key) {
 function run() {
   var req = (typeof $request !== "undefined" && $request) ? $request : {};
 
-  // 精准拦截：仅在 client.action 且 functionId=logConfig 时处理；其余请求静默跳过（不打日志，避免刷屏）
-  // 注：Loon [Script] 正则匹配的是 URL 路径、不含查询串（V1.21 带 ? 写法零命中的根因），
-  //     故“functionId=logConfig”只能在脚本内基于 $request.url 过滤，插件正则保持匹配 /client.action 即可。
+  // 精准拦截：仅处理 functionId=logConfig 的请求。
+  // 自 V1.32 起，插件 [Script] 正则已直接匹配 "client.action.*functionId=logConfig"
+  // （已确认 Loon 正则匹配含查询串；V1.21 当年"零命中"实为静默门控 bug，非正则不支持查询串），
+  // 故脚本层不再承担主过滤；下方 functionId 校验仅作双保险，正常恒为 true。
   var _url = req.url || "";
   var _fn = (String(_url).match(/[?&]functionId=([^&#\s]+)/) || [])[1] || "";
   if (_fn !== "logConfig") { finish(); return; }
