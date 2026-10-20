@@ -20,7 +20,7 @@ var PUSH_GAP = 30 * 1000;                     // 同一 key 推送失败后的�
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
 var NOTIFY_NEW_GAP = 1 * 60 * 1000;            // 「pt_key获取通知」开启时：同一 key 1 分钟内只弹一次（防并发突发刷屏）
 var GET_NOTIFY_GAP = 30 * 60 * 1000;           // 「pt_key获取通知」关闭时：半小时内只通知一次
-var VERSION = "V1.33";
+var VERSION = "V1.34";
 
 // ========== 参数解析 ==========
 // Loon 3.5.x 的 [Argument] 占位式 argument=[{CLIENT_ID},{...}] 运行期会把 $argument
