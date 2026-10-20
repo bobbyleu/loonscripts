@@ -17,7 +17,7 @@ var CAPTURE_ONCE = true;                      // true=同一账号(pt_pin)推送
 var PUSH_GAP = 30 * 1000;                     // 同一 key 推送失败后的最小重试间隔(防高频)
 // （NOTIFY_OK_GAP 已移除：不再发送“pt_key未变”心跳通知；开启推送即强制推送）
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
-var VERSION = "V1.35";
+var VERSION = "V1.36";
 
 // ========== 参数解析 ==========
 // Loon 3.5.x 的 [Argument] 占位式 argument=[{CLIENT_ID},{...}] 运行期会把 $argument
@@ -347,11 +347,12 @@ function run() {
 
   // 当前版本
   log("当前版本：" + VERSION);
+  log("");
 
-  // 获取CK
-  log("开始获取CK……");
-  log("--当前CK获取成功，具体为：pt_key=" + ptKey + " | pt_pin=" + ptPin);
-  log(_changed ? "--CK已发生变化。" : "--与上次CK相同。");
+  // （1）获取CK
+  log("（1）开始获取CK。");
+  log("--获取CK成功，" + (_changed ? "CK已改变" : "与上次相同") + "，值：pt_key=" + ptKey + ",pt_pin=" + ptPin + "。");
+  log("");
 
   // （已移除“pt_key未变化”心跳分支：开启「推送青龙」即对每次捕获强制推送，不再因同值而跳过）
 
@@ -360,7 +361,7 @@ function run() {
 
   // 先判开关：推送青龙=关 → 仅抓取，不进入任何推送/限流逻辑（避免误报“限流”，也不污染节流计时）
   if (!ENABLE_PUSH) {
-    log("3、推送到青龙面板");
+    log("（2）推送CK至青龙面板");
     log("  - 根据设置「推送青龙=关」，仅抓取 CK 不推送青龙。");
     finish(); return;
   }
@@ -370,7 +371,7 @@ function run() {
   var _lastTryKey = sGet(K_TRYKEY + ptPin);
   var _lastTryT = Number(sGet(K_TRY) || "0");
   if (_lastTryKey === ptKey && Date.now() - _lastTryT < PUSH_GAP) {
-    log("3、推送到青龙面板");
+    log("（2）推送CK至青龙面板");
     log("  - 推送节流（同key " + (PUSH_GAP / 1000) + "秒内已尝试，跳过本次；限频后仍将强制推送）。");
     finish(); return;
   }
@@ -382,24 +383,24 @@ function run() {
     for (var i = 0; i < PT_PIN_WHITELIST.length; i++) {
       if (PT_PIN_WHITELIST[i] && dPin(String(PT_PIN_WHITELIST[i])) === ptPin) { ok = true; break; }
     }
-    if (!ok) { setLastKey(ptPin, ptKey); log("3、推送到青龙面板"); log("  - pt_pin 不在白名单，跳过推送。"); finish(); return; }
+    if (!ok) { setLastKey(ptPin, ptKey); log("（2）推送CK至青龙面板"); log("  - pt_pin 不在白名单，跳过推送。"); finish(); return; }
   }
 
   if (!QL_CLIENT_ID || !QL_CLIENT_SECRET) {
-    log("3、推送到青龙面板");
+    log("（2）推送CK至青龙面板");
     log("  - 青龙凭证未配置，已终止推送。请在 Loon 参数填写 CLIENT_ID / CLIENT_SECRET");
     notify("京东Cookie未推送", "凭证未配置", "Loon脚本参数中填入 CLIENT_ID/CLIENT_SECRET");
     finish(); return;
   }
 
   if (!QL_URL) {
-    log("3、推送到青龙面板");
+    log("（2）推送CK至青龙面板");
     log("  - 青龙地址(QL_URL)未填写，已终止推送。请在插件参数填写 QL_URL");
     notify("京东Cookie未推送", "青龙地址未配置", "Loon插件参数中填入 QL_URL");
     finish(); return;
   }
 
-  log("3、推送到青龙面板");
+  log("（2）推送CK至青龙面板");
   log("  - 开始推送（目标=" + hostOf(QL_URL) + " | 出站=" + QL_HTTP_NODE + "）");
   pushCK(ptPin, ptKey, function (ok2, msg) {
     if (ok2) {
