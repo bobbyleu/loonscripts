@@ -25,6 +25,7 @@
 //   V1.20 修复“打开我的无触发”根因（重试3次/2s不变）：京东“我的”个人页实际请求的是 `wq.jd.com/user_new/info/GetJDUserInfoUnion` 或 `me-api.jd.com/user_new/info/GetJDUserInfoUnion`（社区公认打开个人中心即触发的抓CK接口），而此前 MITM 与正则只覆盖 `api.m.jd.com`，故该请求既未被解密也未被命中。本次：① [Mitm] hostname 由 `api.m.jd.com` 扩展为 `api.m.jd.com, me-api.jd.com, wq.jd.com`（%APPEND% 追加，不覆盖全局）；② [Script] 正则主机段由 `api\.m` 扩展为 `(api\.m|me-api|wq)`，路径 `user_new/info/GetJDUserInfoUnion` 三域名通用；③ 保留 `client.action?functionId=signBean` 作为领京豆/签到触发。脚本仍从请求头 Cookie 读取 pt_key，逻辑不变。
 //   V1.21 回退为“先抓 api.m.jd.com/client.action?”（重试3次/2s不变）：用户要求先以宽泛口径抓到数据再一起看如何收窄，故 [Script] 正则改回 `^https?:\/\/api\.m\.jd\.com\/client\.action\?`（匹配该域下所有 client.action 接口，几乎覆盖 App 全部 API 请求，均携带登录 Cookie），[Mitm] hostname 同步退回仅 `api.m.jd.com`（移除 me-api/wq）。脚本去重/节流逻辑不变，不会因请求变多而刷屏；后续再据实测请求确定精准收窄目标。
 //   V1.22 修复 V1.21“零命中”根因（重试3次/2s不变）：V1.21 正则写成 `client\.action\?`（要求字面 `?` 紧跟 client.action），而 Loon 的 http-request 匹配在部分版本下只匹配“路径”不含查询串，导致 `client.action?` 永远对不上 → 脚本从不触发。本次去掉正则里的 `?`，改为前缀匹配 `^https?:\/\/api\.m\.jd\.com\/client\.action`（无论 url 是否带查询串都能命中），既保留“只抓 client.action”的意图，又消除该坑；[Mitm] hostname 仍为 `api.m.jd.com`。若重导后仍零命中，则转向排查 MITM（开关/证书信任/主机名列表）与插件是否真正加载。
+//   V1.23 先保证“能触发”（重试3次/2s不变）：经用户实测，`\/client\.action` 路径前缀在其实机 Loon 上对 api.m.jd.com 永远零命中（即便 MITM 正常、流量日志可见 api.m.jd.com 请求），故 [Script] 正则退回已验证可触发的整域名 `^https?:\/\/api\.m\.jd\.com`；并新增“未变化静默”机制（pt_key 未变且非首次即静默返回，仅首次/变化时打印 1/2/3 日志与推送）以解决整域名带来的刷屏；另加临时诊断 debugFn 采样命中请求的 functionId（节流2s），用于定位“我的”页对应接口，后续据实测 functionId 精准收窄正则。
 
 //
 
@@ -46,7 +47,7 @@ var PUSH_GAP = 30 * 1000;                     // 同一 key 推送失败后的�
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
 var NOTIFY_NEW_GAP = 1 * 60 * 1000;            // 「pt_key获取通知」开启时：同一 key 1 分钟内只弹一次（防并发突发刷屏）
 var GET_NOTIFY_GAP = 30 * 60 * 1000;           // 「pt_key获取通知」关闭时：半小时内只通知一次
-var VERSION = "V1.22";
+var VERSION = "V1.23";
 
 // ========== 参数解析 ==========
 // Loon 3.5.x 的 [Argument] 占位式 argument=[{CLIENT_ID},{...}] 运行期会把 $argument
@@ -379,6 +380,23 @@ function maybeNotifyGet(pin, key) {
   }
 }
 
+// 临时诊断：采样命中请求的 functionId（节流2s），用于定位“我的”页对应的接口。
+// 定位完成后，可删除本函数及其调用（run() 中的 debugFn(req) 一行），并据实测 functionId 精准收窄正则。
+function debugFn(req) {
+  try {
+    var u = (req && req.url) ? req.url : "";
+    var fm = u.match(/[?&]functionId=([^&\s]+)/);
+    if (!fm) return;
+    var fid = decodeURIComponent(fm[1]);
+    var last = sGet("JDCK_DBGFN");
+    var now = Date.now();
+    var p = (last || "").split("|");
+    if (p[0] === fid && (now - Number(p[1] || 0)) < 2000) return;
+    sSet("JDCK_DBGFN", fid + "|" + now);
+    log("DEBUG 接口 functionId=" + fid);
+  } catch (e) {}
+}
+
 function run() {
   var req = (typeof $request !== "undefined" && $request) ? $request : {};
   var headers = req.headers || {};
@@ -394,6 +412,13 @@ function run() {
   // 比对 pt_key 的值：仅用于日志展示「是否发生变化」，不再据此跳过推送（开启「推送青龙」即强制推送）
   var _stored = getLastKey(ptPin);
   var _changed = !!(ptKey && _stored !== ptKey);
+  var _first = !_stored;
+
+  // 临时诊断：采样命中接口的 functionId（定位“我的”页对应接口用；不影响主流程）
+  debugFn(req);
+
+  // 去噪：pt_key 未变化且非首次捕获 → 静默返回，避免整域名匹配下每次 API 请求都刷日志/通知
+  if (!_changed && !_first) { finish(); return; }
 
   // 每次执行输出必要日志，便于确认脚本在跑、参数解析是否正确（分行显示，避免挤在一起）
   var _raw;
