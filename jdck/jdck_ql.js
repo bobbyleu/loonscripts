@@ -20,7 +20,7 @@ var PUSH_GAP = 30 * 1000;                     // 同一 key 推送失败后的�
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
 var NOTIFY_NEW_GAP = 1 * 60 * 1000;            // 「pt_key获取通知」开启时：同一 key 1 分钟内只弹一次（防并发突发刷屏）
 var GET_NOTIFY_GAP = 30 * 60 * 1000;           // 「pt_key获取通知」关闭时：半小时内只通知一次
-var VERSION = "V1.28";
+var VERSION = "V1.29";
 
 // ========== 参数解析 ==========
 // Loon 3.5.x 的 [Argument] 占位式 argument=[{CLIENT_ID},{...}] 运行期会把 $argument
@@ -398,8 +398,15 @@ function run() {
   // 获取到 pt_key 的通知：由「pt_key获取通知」开关控制（开启=即时通知，关闭=30分钟仅一次）
   maybeNotifyGet(ptPin, ptKey);
 
+  // 先判开关：推送青龙=关 → 仅抓取，不进入任何推送/限流逻辑（避免误报“限流”，也不污染节流计时）
+  if (!ENABLE_PUSH) {
+    log("3、推送到青龙面板");
+    log("  - 根据设置「推送青龙=关」，仅抓取 CK 不推送青龙。");
+    finish(); return;
+  }
+
   // 推送节流：同 key 在 PUSH_GAP(30s) 内只尝试一次（压突发刷屏，也防失败高频重试）
-  // 注意：仅是短时节流，并非「同值永久跳过」——开启「推送青龙」即强制推送，每次捕获都会尝试（受 30s 限频保护）。
+  // 仅在真正推送时才做限频，且节流计时只在此时写入（开启「推送青龙」即强制推送，受 30s 限频保护）
   var _lastTryKey = sGet(K_TRYKEY + ptPin);
   var _lastTryT = Number(sGet(K_TRY) || "0");
   if (_lastTryKey === ptKey && Date.now() - _lastTryT < PUSH_GAP) {
@@ -409,12 +416,6 @@ function run() {
   }
   sSet(K_TRYKEY + ptPin, ptKey);
   sSet(K_TRY, String(Date.now()));
-
-  if (!ENABLE_PUSH) {
-    log("3、推送到青龙面板");
-    log("  - 根据设置「推送青龙=关」，仅抓取 CK 不推送青龙。");
-    finish(); return;
-  }
 
   if (WHITELIST_MODE) {
     var ok = false;
