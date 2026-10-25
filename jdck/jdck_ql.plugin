@@ -3,6 +3,7 @@
 #!author = bobbyleu
 #!homepage = https://github.com/bobbyleu/loonscripts
 #!tag = 京东CK自动推送
+#!icon = https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/0b/0e/ad/0b0eaddf-8cc3-7843-954c-f96691d8d814/AppIcon-0-0-1x_U007epad-0-1-0-0-85-220.png/144x144.png
 #!arguments-desc = CLIENT_ID/CLIENT_SECRET 为青龙面板开放授权密钥；推送CK至青龙面板=获取到pt_key后强制推送至青龙面板；QL_URL 为青龙面板地址。
 
 [Argument]
