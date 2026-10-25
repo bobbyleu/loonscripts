@@ -1,0 +1,23 @@
+#!name = 起点Cookie推送青龙面板
+#!desc = 获取起点读书Cookie，按uid合并推送到青龙变量（同uid改写/新uid新增/其他账号保留），推送后可触发青龙签到任务。当前版本：V1.00
+#!author = bobbyleu
+#!homepage = https://github.com/bobbyleu/loonscripts
+#!tag = 起点Cookie推送青龙
+#!arguments-desc = CLIENT_ID/CLIENT_SECRET 为青龙面板开放授权密钥（需 envs+crons 权限）；QL_URL 为青龙面板地址；推送Cookie至青龙面板=获取到Cookie后推送至青龙；推送后触发签到任务=推送成功立即执行青龙签到任务；TASK_KEY/ENV_NAME 一般保持默认。
+
+[Argument]
+CLIENT_ID=input,"",tag=青龙面板CLIENT_ID
+CLIENT_SECRET=input,"",tag=青龙面板CLIENT_SECRET
+QL_URL=input,"",tag=青龙面板地址
+PUSH=switch,"true","false",tag=推送Cookie至青龙面板
+RUN_SIGN=switch,"true","false",tag=推送后触发签到任务
+TASK_KEY=input,"qdreader",tag=签到任务匹配关键词, desc=青龙任务命令中包含的关键词，用于定位签到任务，默认 qdreader
+ENV_NAME=input,"QDREADER_COOKIE",tag=青龙变量名, desc=存放起点Cookie的青龙环境变量名，默认 QDREADER_COOKIE
+CF_ACCESS_ID=input,"",tag=CloudflareAccess客户端ID
+CF_ACCESS_SECRET=input,"",tag=CloudflareAccess客户端密钥
+
+[Script]
+http-response ^https?:\/\/h5\.if\.qidian\.com\/argus\/api\/v1\/user\/getlogininfo script-path=https://raw.githubusercontent.com/bobbyleu/loonscripts/main/qdck/qdck_ql.js, requires-body=1, tag=起点Cookie推送青龙面板, timeout=60, enable=true, argument=[{CLIENT_ID},{CLIENT_SECRET},{QL_URL},{PUSH},{RUN_SIGN},{TASK_KEY},{ENV_NAME},{CF_ACCESS_ID},{CF_ACCESS_SECRET}]
+
+[MITM]
+hostname = %APPEND% h5.if.qidian.com
