@@ -13,8 +13,11 @@
 //   PUSH                     : 推送青龙（true=获取到Cookie即推送 / false=仅抓取不推送）
 //   RUN_SIGN                 : 推送后触发青龙签到任务（true=推送成功后立即执行签到任务 / false=只更新变量）
 //   TASK_KEY                 : 青龙签到任务的匹配关键词（按任务 command 包含该字符串定位，默认 qdreader）
-//   ENV_NAME                 : 青龙环境变量名（默认 QDREADER_COOKIE）
+//   ADV_JOB / EXTRA_ADV_JOB / LOTTERY / WEEKLY_EXCHANGE / CHAPTER_CARD / MESSAGE_BOX
+//                            : 任务开关（激励任务/每日任务/每日抽奖/每周兑换/章节卡片/大咖荐书，除大咖荐书外默认开），
+//                              每次推送前按此处设置同步写入青龙 QDREADER_*_ENABLE 变量：青龙没有则新建，已有则更新
 //   CF_ACCESS_ID / CF_ACCESS_SECRET : Cloudflare Access 服务令牌（可选，为青龙请求加边缘鉴权）
+// 青龙 Cookie 变量名固定为 QDREADER_COOKIE。
 // 兼容 $persistentStore 兜底。
 
 // ========== 配置区（一般无需改动）==========
@@ -23,8 +26,8 @@ var WHITELIST_MODE = false;                   // true=仅白名单内 uid 写入
 var UID_WHITELIST = [];                       // 白名单 uid，如 ["123456","789012"]
 var PUSH_GAP = 30 * 1000;                     // 同一 uid 两次推送尝试的最小间隔(防高频)：突发多次捕获只推一次，也防失败高频重试
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
-var VERSION = "V1.00";
-var QL_ENV_NAME = "QDREADER_COOKIE";          // 青龙环境变量名（默认值，可被插件参数 ENV_NAME 覆盖）
+var VERSION = "V1.01";
+var QL_ENV_NAME = "QDREADER_COOKIE";          // 青龙 Cookie 环境变量名（固定值）
 var QL_TASK_KEY = "qdreader";                 // 青龙签到任务匹配关键词（默认值，可被插件参数 TASK_KEY 覆盖）
 var UID_SPLIT_INDEX = 11;                     // base64(QDHeader).split('|') 中 uid 的下标（与主脚本一致）
 var BUSY_TTL = 110 * 1000;                    // 全局单飞锁有效期(ms)：一次完整推送(含复核/触发)可能跨多次网络往返，留足时间
@@ -44,7 +47,7 @@ function parseArgs() {
   function absorb(o) {
     if (!o || typeof o !== "object") return;
     if (Array.isArray(o)) {
-      var names = ["CLIENT_ID", "CLIENT_SECRET", "QL_URL", "PUSH", "RUN_SIGN", "TASK_KEY", "ENV_NAME", "CF_ACCESS_ID", "CF_ACCESS_SECRET"];
+      var names = ["CLIENT_ID", "CLIENT_SECRET", "QL_URL", "PUSH", "RUN_SIGN", "TASK_KEY", "ADV_JOB", "EXTRA_ADV_JOB", "LOTTERY", "WEEKLY_EXCHANGE", "CHAPTER_CARD", "MESSAGE_BOX", "CF_ACCESS_ID", "CF_ACCESS_SECRET"];
       o.forEach(function (v, idx) {
         if (names[idx] && v !== undefined && v !== null) map[names[idx]] = String(v).trim();
       });
@@ -79,8 +82,8 @@ function parseArgs() {
           }
         });
       } else if (s) {
-        // 逗号占位式 id,secret,url,true,true,qdreader,QDREADER_COOKIE
-        var names2 = ["CLIENT_ID", "CLIENT_SECRET", "QL_URL", "PUSH", "RUN_SIGN", "TASK_KEY", "ENV_NAME", "CF_ACCESS_ID", "CF_ACCESS_SECRET"];
+        // 逗号占位式 id,secret,url,true,true,qdreader,true,true,true,true,true,false
+        var names2 = ["CLIENT_ID", "CLIENT_SECRET", "QL_URL", "PUSH", "RUN_SIGN", "TASK_KEY", "ADV_JOB", "EXTRA_ADV_JOB", "LOTTERY", "WEEKLY_EXCHANGE", "CHAPTER_CARD", "MESSAGE_BOX", "CF_ACCESS_ID", "CF_ACCESS_SECRET"];
         s.split(",").forEach(function (v, idx) {
           v = v.trim();
           if (/^\{.*\}$/.test(v)) return; // 未替换的占位符，跳过
@@ -127,10 +130,7 @@ if (QL_URL) {
 }
 if (_argUrl) sSet("QDCK_URL", QL_URL);
 
-// 变量名 / 任务关键词：参数优先，缺省用内置默认
-var _argEnv = getArg("ENV_NAME", "");
-QL_ENV_NAME = _argEnv ? _argEnv : (sGet("QDCK_ENVNAME") || QL_ENV_NAME);
-if (_argEnv) sSet("QDCK_ENVNAME", _argEnv);
+// 任务关键词：参数优先，缺省用内置默认（Cookie 变量名固定为 QDREADER_COOKIE）
 var _argTaskKey = getArg("TASK_KEY", "");
 QL_TASK_KEY = _argTaskKey ? _argTaskKey : (sGet("QDCK_TASKKEY") || QL_TASK_KEY);
 if (_argTaskKey) sSet("QDCK_TASKKEY", _argTaskKey);
@@ -148,6 +148,66 @@ if (_asecFromArg) sSet("QDCK_CFSEC", _argAccessSec);
 
 var ENABLE_PUSH = parseBool(getArg("PUSH", "true"), true);
 var ENABLE_RUN_SIGN = parseBool(getArg("RUN_SIGN", "true"), true);
+
+// ========== 任务开关同步至青龙环境变量 ==========
+// 插件参数面板的 6 个任务开关 → 青龙 QDREADER_*_ENABLE 变量：
+//  - 青龙没有该变量 → POST 新建（value=true/false，remarks=任务名）并启用；
+//  - 青龙已有该变量 → PUT 按插件设置更新 value 与 remarks（值/备注无变化则跳过，避免无谓写）；
+//  - 变量被禁用(status≠0)时顺手恢复启用。
+// 除大咖荐书外默认开启（与起点读书签到插件的默认行为保持一致，签到主脚本侧可再覆盖）。
+var ENV_SWITCHES = [
+  { arg: "ADV_JOB",         env: "QDREADER_ADV_JOB_ENABLE",         name: "激励任务", def: true },
+  { arg: "EXTRA_ADV_JOB",   env: "QDREADER_EXTRA_ADV_JOB_ENABLE",   name: "每日任务", def: true },
+  { arg: "LOTTERY",         env: "QDREADER_LOTTERY_ENABLE",         name: "每日抽奖", def: true },
+  { arg: "WEEKLY_EXCHANGE", env: "QDREADER_WEEKLY_EXCHANGE_ENABLE", name: "每周兑换", def: true },
+  { arg: "CHAPTER_CARD",    env: "QDREADER_CHAPTER_CARD_ENABLE",    name: "章节卡片", def: true },
+  { arg: "MESSAGE_BOX",     env: "QDREADER_MESSAGE_BOX_ENABLE",     name: "大咖荐书", def: false }
+];
+
+// 同步单个开关：查询存在性 → 新建或更新。单个开关失败不影响其他开关与 Cookie 推送。
+function syncOneSwitch(t, sw, val, cb) {
+  var valStr = val ? "true" : "false";
+  qlReq("GET", "/open/envs?searchValue=" + encodeURIComponent(sw.env) + "&t=" + Date.now(), null, t, function (e, d) {
+    if (e) return cb(false, sw.name + "(" + sw.env + ")：查询失败 " + e);
+    var list = Array.isArray(d) ? d : [];
+    var tgt = null;
+    for (var i = 0; i < list.length; i++) { if (list[i] && list[i].name === sw.env) { tgt = list[i]; break; } }
+
+    if (!tgt) {
+      // 青龙没有该变量：新建并启用
+      return qlReq("POST", "/open/envs", [{ name: sw.env, value: valStr, remarks: sw.name }], t, function (e2, d2) {
+        if (e2) return cb(false, sw.name + "(" + sw.env + ")：新建失败 " + e2);
+        var nid = (d2 && d2[0]) ? d2[0].id : null;
+        if (nid) enableEnv("启用开关", t, nid);
+        cb(true, sw.name + "(" + sw.env + ")：已新建并设为 " + valStr);
+      }, 1, "新建开关");
+    }
+
+    var changed = (String(tgt.value || "") !== valStr) || (String(tgt.remarks || "") !== sw.name);
+    if (!changed) return cb(true, sw.name + "(" + sw.env + ")：已是最新值 " + valStr);
+    qlReq("PUT", "/open/envs", { id: tgt.id, name: sw.env, value: valStr, remarks: sw.name }, t, function (e3) {
+      if (e3) return cb(false, sw.name + "(" + sw.env + ")：更新失败 " + e3);
+      if (tgt.status !== undefined && tgt.status !== null && tgt.status !== 0) enableEnv("启用开关", t, tgt.id);
+      cb(true, sw.name + "(" + sw.env + ")：已更新为 " + valStr);
+    }, 1, "更新开关");
+  }, 1, "查开关");
+}
+
+// 串行同步全部开关（避免并发写青龙），全部完成后回调
+function syncEnvSwitches(t, cb) {
+  var i = 0;
+  function next() {
+    if (i >= ENV_SWITCHES.length) return cb();
+    var sw = ENV_SWITCHES[i];
+    i++;
+    var val = parseBool(getArg(sw.arg, sw.def ? "true" : "false"), sw.def);
+    syncOneSwitch(t, sw, val, function (ok, msg) {
+      log("  " + (ok ? "✅ " : "⚠️ ") + msg);
+      next();
+    });
+  }
+  next();
+}
 
 // ========== 持久化键 ==========
 // QDCK_LAST_<uid>：每个 uid 上次已推送的 cookie 值，作为「是否变化/去重」基准。
@@ -758,7 +818,20 @@ function run() {
 
   log("2、推送Cookie至青龙面板。");
   log("- 目标=" + hostOf(QL_URL) + " | 变量=" + QL_ENV_NAME + " | 触发签到=" + (ENABLE_RUN_SIGN ? "开" : "关") + " | 出站=" + QL_HTTP_NODE + (QL_ACCESS_ID ? " | CloudflareAccess=开" : " | CloudflareAccess=关"));
-  decidePush(uid, cookie);
+  // 先按插件设置同步任务开关至青龙环境变量（没有则新建、已有则更新），再进入 Cookie 推送流程
+  getToken("同步开关", function (e, tok) {
+    if (e) {
+      log("- 任务开关同步：跳过（取 token 失败：" + e + "），不影响 Cookie 推送。");
+      log("");
+      decidePush(uid, cookie);
+      return;
+    }
+    log("- 任务开关：按插件设置同步至青龙环境变量（没有则新建，已有则更新，备注为任务名）：");
+    syncEnvSwitches(tok, function () {
+      log("");
+      decidePush(uid, cookie);
+    });
+  });
   return;
 }
 

@@ -145,7 +145,7 @@ function check(desc, cond) {
 }
 
 (async function main() {
-  const ARG = { CLIENT_ID: "id", CLIENT_SECRET: "sec", QL_URL: "http://ql.local", PUSH: "true", RUN_SIGN: "true", TASK_KEY: "qdreader", ENV_NAME: "QDREADER_COOKIE" };
+  const ARG = { CLIENT_ID: "id", CLIENT_SECRET: "sec", QL_URL: "http://ql.local", PUSH: "true", RUN_SIGN: "true", TASK_KEY: "qdreader", ADV_JOB: "true", EXTRA_ADV_JOB: "true", LOTTERY: "true", WEEKLY_EXCHANGE: "true", CHAPTER_CARD: "true", MESSAGE_BOX: "true" };
 
   // ===== 场景1：请求无 Cookie → 直接跳过 =====
   console.log("\n===== 场景1：无 Cookie =====");
@@ -177,8 +177,10 @@ function check(desc, cond) {
     response: { body: JSON.stringify({ Data: { UserId: "10001" } }) },
     wait: 9000
   });
-  check("变量已新建", r.ql.envs.length === 1 && r.ql.envs[0].name === "QDREADER_COOKIE");
-  check("value 为 JSON Map 且含 uid=10001", (() => { try { const m = JSON.parse(r.ql.envs[0].value); return m["10001"] === ck3; } catch (e) { return false; } })());
+  const ckEnv3 = r.ql.envs.find(e => e.name === "QDREADER_COOKIE");
+  check("Cookie 变量已新建", !!ckEnv3);
+  check("value 为 JSON Map 且含 uid=10001", (() => { try { const m = JSON.parse(ckEnv3.value); return m["10001"] === ck3; } catch (e) { return false; } })());
+  check("6 个任务开关变量已同步新建", ["QDREADER_ADV_JOB_ENABLE","QDREADER_EXTRA_ADV_JOB_ENABLE","QDREADER_LOTTERY_ENABLE","QDREADER_WEEKLY_EXCHANGE_ENABLE","QDREADER_CHAPTER_CARD_ENABLE","QDREADER_MESSAGE_BOX_ENABLE"].every(n => r.ql.envs.some(e => e.name === n)));
   check("签到任务已触发（仅 status=0 的 qdreader）", JSON.stringify(r.ql.triggered) === "[1]");
   check("发送成功通知", r.notifs.some(n => n.title === "起点Cookie推送青龙成功"));
   check("日志含二次复核✅", r.logs.some(l => l.indexOf("二次复核：✅") >= 0));
@@ -301,6 +303,49 @@ function check(desc, cond) {
     wait: 9000
   });
   check("按响应体 UserId 建键", (() => { try { const m = JSON.parse(r.ql.envs.find(e => e.id === 61).value); return m["13013"] === ck12; } catch (e) { return false; } })());
+
+  // ===== 场景13：任务开关同步（已最新跳过/值不同更新/禁用恢复/缺失新建） =====
+  console.log("\n===== 场景13：任务开关同步 =====");
+  r = await runScenario("switch-sync", {
+    argument: Object.assign({}, ARG, { MESSAGE_BOX: "true" }),
+    request: { headers: { Cookie: makeCookie("14014") } },
+    ql: { envs: [
+      { id: 70, name: "QDREADER_ADV_JOB_ENABLE", value: "true", status: 0, remarks: "激励任务" },
+      { id: 71, name: "QDREADER_LOTTERY_ENABLE", value: "false", status: 0, remarks: "每日抽奖" },
+      { id: 72, name: "QDREADER_MESSAGE_BOX_ENABLE", value: "false", status: 1, remarks: "大咖荐书" },
+      { id: 73, name: "QDREADER_COOKIE", value: "{}", status: 0, remarks: "" }
+    ] },
+    wait: 12000
+  });
+  check("ADV_JOB 已最新则跳过（不重复写）", r.logs.some(l => l.indexOf("已是最新值") >= 0 && l.indexOf("QDREADER_ADV_JOB_ENABLE") >= 0));
+  check("LOTTERY 值不同已更新为 true", (() => { const e = r.ql.envs.find(x => x.id === 71); return e && e.value === "true"; })());
+  check("MESSAGE_BOX 按插件参数更新为 true", (() => { const e = r.ql.envs.find(x => x.id === 72); return e && e.value === "true"; })());
+  check("MESSAGE_BOX 被禁用后恢复启用(status=0)", (() => { const e = r.ql.envs.find(x => x.id === 72); return e && e.status === 0; })());
+  check("缺失的开关已新建且值为 true", ["QDREADER_EXTRA_ADV_JOB_ENABLE","QDREADER_WEEKLY_EXCHANGE_ENABLE","QDREADER_CHAPTER_CARD_ENABLE"].every(n => { const e = r.ql.envs.find(x => x.name === n); return e && e.value === "true"; }));
+  check("新建开关备注为中文任务名", (() => { const e = r.ql.envs.find(x => x.name === "QDREADER_EXTRA_ADV_JOB_ENABLE"); return e && e.remarks === "每日任务"; })());
+  check("Cookie 推送不受开关同步影响", (() => { try { const m = JSON.parse(r.ql.envs.find(e => e.id === 73).value); return !!m["14014"]; } catch (e) { return false; } })());
+
+  // ===== 场景14：插件参数未传开关（模拟默认值） =====
+  console.log("\n===== 场景14：开关默认值（参数未传） =====");
+  r = await runScenario("switch-default", {
+    argument: { CLIENT_ID: "id", CLIENT_SECRET: "sec", QL_URL: "http://ql.local", PUSH: "true", RUN_SIGN: "true", TASK_KEY: "qdreader" },
+    request: { headers: { Cookie: makeCookie("15015") } },
+    ql: { envs: [] },
+    wait: 12000
+  });
+  check("除大咖荐书外 5 个开关默认 true", ["QDREADER_ADV_JOB_ENABLE","QDREADER_EXTRA_ADV_JOB_ENABLE","QDREADER_LOTTERY_ENABLE","QDREADER_WEEKLY_EXCHANGE_ENABLE","QDREADER_CHAPTER_CARD_ENABLE"].every(n => { const e = r.ql.envs.find(x => x.name === n); return e && e.value === "true"; }));
+  check("大咖荐书默认 false", (() => { const e = r.ql.envs.find(x => x.name === "QDREADER_MESSAGE_BOX_ENABLE"); return e && e.value === "false"; })());
+
+  // ===== 场景15：ENV_NAME 参数已移除（变量名固定 QDREADER_COOKIE） =====
+  console.log("\n===== 场景15：变量名固定 =====");
+  r = await runScenario("fixed-env-name", {
+    argument: Object.assign({}, ARG, { ENV_NAME: "SHOULD_BE_IGNORED" }),
+    request: { headers: { Cookie: makeCookie("16016") } },
+    ql: { envs: [{ id: 74, name: "QDREADER_COOKIE", value: "{}", status: 0, remarks: "" }] },
+    wait: 12000
+  });
+  check("忽略传入的 ENV_NAME，仍写 QDREADER_COOKIE", r.ql.envs.some(e => e.name === "QDREADER_COOKIE") && !r.ql.envs.some(e => e.name === "SHOULD_BE_IGNORED"));
+  check("cookie 已写入 QDREADER_COOKIE", (() => { try { const m = JSON.parse(r.ql.envs.find(e => e.id === 74).value); return !!m["16016"]; } catch (e) { return false; } })());
 
   console.log("\n========================================");
   console.log("结果：" + pass + " 通过 / " + fail + " 失败");
