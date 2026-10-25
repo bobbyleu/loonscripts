@@ -6,18 +6,18 @@
 // 参数通过 Loon 插件「参数面板」设置（导入后在 Loon → 脚本 → 点开本脚本 → 参数 中可见）：
 //   CLIENT_ID / CLIENT_SECRET : 青龙面板「系统设置-应用设置-开放授权」密钥
 //   QL_URL                   : 青龙面板地址（**无默认值，必须由用户在插件参数填写**，如 https://your-domain.com）
-//   PUSH                     : 强制推送青龙（true=每次捕获都推送 / false=仅抓取不推送）
+//   PUSH                     : 推送青龙（true=捕获到新 key 时推送 / false=仅抓取不推送）
+//   CF_ACCESS_ID / CF_ACCESS_SECRET : Cloudflare Access 服务令牌（可选，为青龙请求加边缘鉴权）
 // 兼容 $persistentStore 兜底。
 
 // ========== 配置区（一般无需改动）==========
 var QL_URL = "";   // 默认空：青龙地址必须由用户在 Loon 参数 QL_URL 中填写，脚本不预置任何地址（避免暴露）
 var WHITELIST_MODE = false;                   // true=仅白名单内账号写入青龙
 var PT_PIN_WHITELIST = [];                    // 白名单 pt_pin，如 ["JD_xxx","JD_yyy"]
-var CAPTURE_ONCE = true;                      // true=同一账号(pt_pin)推送成功后按 pt_key 值去重
 var PUSH_GAP = 30 * 1000;                     // 同一 key 推送失败后的最小重试间隔(防高频)
 // （NOTIFY_OK_GAP 已移除：不再发送“pt_key未变”心跳通知；开启推送即强制推送）
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
-var VERSION = "V1.37";
+var VERSION = "V1.38";
 
 // ========== 参数解析 ==========
 // Loon 3.5.x 的 [Argument] 占位式 argument=[{CLIENT_ID},{...}] 运行期会把 $argument
@@ -107,12 +107,14 @@ var QL_CLIENT_SECRET = _secFromArg ? _argSec : sGet("JDCK_CLSEC");
 if (_idFromArg) sSet("JDCK_CLID", _argId);
 if (_secFromArg) sSet("JDCK_CLSEC", _argSec);
 
-var _credSrc = (_idFromArg || _secFromArg) ? "argument" : ((QL_CLIENT_ID && QL_CLIENT_SECRET) ? "persistent" : "空");
-
 // 青龙地址：参数 QL_URL 优先 + $persistentStore 兜底 + 默认
 var _argUrl = getArg("QL_URL", "");
 QL_URL = _argUrl ? _argUrl : (sGet("JDCK_URL") || QL_URL);
-if (_argUrl) sSet("JDCK_URL", _argUrl);
+if (QL_URL) {
+  if (!/^https?:\/\//i.test(QL_URL)) QL_URL = "https://" + QL_URL; // 用户可能只填域名，补默认 https
+  QL_URL = QL_URL.replace(/\/+$/, "");                             // 去尾部斜杠，避免拼出 //open/envs
+}
+if (_argUrl) sSet("JDCK_URL", QL_URL);
 
 // Cloudflare Access 服务令牌（Service Auth）：给所有青龙请求加 CF-Access-* 头，
 // 即便隧道域名泄露，无令牌请求在 Cloudflare 边缘即被拒。通过插件参数 CF_ACCESS_ID / CF_ACCESS_SECRET 输入。
@@ -128,19 +130,12 @@ if (_asecFromArg) sSet("JDCK_CFSEC", _argAccessSec);
 var ENABLE_PUSH = parseBool(getArg("PUSH", "true"), true);
 
 // ========== 持久化键 ==========
-// 按 pt_key 值去重：记录每个 pt_pin 上次已推送的 pt_key 值，
-// 仅当值真变化(轮换/重登)才重新推送；pt_key 稳定时彻底静默，过期重登后自动续上。
+// JDCK_LAST_<pin>：每个 pt_pin 上次已推送的 pt_key 值，作为「是否变化/去重」基准。
 var K_TRY = "JDCK_TRY";         // 上次推送尝试时间(节流)
 function lastKeyStore(pin) { return "JDCK_LAST_" + pin; }
 function getLastKey(pin) { return sGet(lastKeyStore(pin)); }
 function setLastKey(pin, key) { sSet(lastKeyStore(pin), key); }
-var K_SEEN = "JDCK_SEEN_";           // 早期去重：上次“已见”的 pt_key（捕获即写，压制并发突发）
-function getSeen(pin) { return sGet(K_SEEN + pin); }
-function setSeen(pin, key) { sSet(K_SEEN + pin, key); }
-var K_NOTIFY_OK = "JDCK_NOTIFYOK_";  // 上次「推送成功」通知时间（1min 时限兜底）
-var K_NOTIFY_OK_KEY = "JDCK_NOTIFYOKKEY_"; // 上次「推送成功」通知的 pt_key 值（仅同值才限频）
 var K_FAIL_NOTIFY = "JDCK_FAILNOTIFY"; // 上次「推送失败」通知时间
-var K_BEAT = "JDCK_BEAT";             // 上次「pt_key未变」心跳通知时间
 var K_TRYKEY = "JDCK_TRYKEY_";         // 上次尝试推送的 key（前缀，拼接 pt_pin）
 var K_CAP = "JDCK_CAP_";               // 最新捕获的 pt_key（每次捕获都写，供单飞锁补推最新值）
 function getCap(pin) { return sGet(K_CAP + pin); }
@@ -154,6 +149,7 @@ var DEBOUNCE_MS = 4000;                // 未变化捕获的缓冲窗口(ms)：�
 
 // ========== 工具 ==========
 function clip(s, n) { s = (s === undefined || s === null) ? "" : String(s); return s.length > n ? s.slice(0, n) + "…" : s; }
+function maskKey(s) { s = (s === undefined || s === null) ? "" : String(s); return s.length <= 8 ? "****" : s.slice(0, 4) + "…" + s.slice(-4); } // 通知里脱敏 pt_key，避免明文外泄到 Bark 等渠道
 function hostOf(u) { var m = String(u || "").match(/^https?:\/\/([^\/?#]+)/); return m ? m[1] : String(u || ""); }
 function log(m) { try { console.log(m); } catch (e) {} }
 function notify(t, s, b) { try { $notification.post(t || "", s || "", b || ""); } catch (e) {} }
@@ -216,8 +212,9 @@ function qlReq(method, path, body, token, cb, _attempt, _label) {
       log(_lab + "推送失败：网络错误 " + clip(es, 200));
       return cb("网络错误: " + es);
     }
-    var status = (resp && resp.status) ? resp.status : ((resp && resp.statusCode) ? resp.statusCode : "?");
-    var j;
+  var status = (resp && resp.status) ? resp.status : ((resp && resp.statusCode) ? resp.statusCode : "?");
+  if (status === 401) clearCachedToken(); // token 失效(如密钥变更)：立即清缓存，下次取新 token
+  var j;
     try { j = JSON.parse(data); }
     catch (e) { log(_lab + "推送失败：响应非JSON HTTP " + status + " " + clip(String(data), 200)); return cb("响应非JSON (HTTP " + status + ")"); }
     if (!j || j.code !== 200) {
@@ -232,11 +229,23 @@ function qlReq(method, path, body, token, cb, _attempt, _label) {
   });
 }
 
+// 青龙 open API token 缓存：复用同一 token，省去热路径(尤其二次复核)重复的 token 握手往返，
+// 降低直连 Cloudflare 边缘抖动时的超时概率。遇 401 立即清缓存重取。
+var K_TOK = "JDCK_TOK";         // 缓存的 token
+var K_TOKEXP = "JDCK_TOKEXP";   // token 过期时间戳(ms)
+var TOK_TTL = 6 * 60 * 60 * 1000; // 缓存有效期(6h)
+function getCachedToken() { var t = sGet(K_TOK); var exp = Number(sGet(K_TOKEXP) || "0"); return (t && Date.now() < exp) ? t : ""; }
+function setCachedToken(t) { sSet(K_TOK, t); sSet(K_TOKEXP, String(Date.now() + TOK_TTL)); }
+function clearCachedToken() { sSet(K_TOK, ""); sSet(K_TOKEXP, "0"); }
+
 function getToken(label, cb) {
+  var cached = getCachedToken();
+  if (cached) return cb(null, cached);       // 命中缓存：零往返
   var p = "/open/auth/token?client_id=" + encodeURIComponent(QL_CLIENT_ID) + "&client_secret=" + encodeURIComponent(QL_CLIENT_SECRET);
   qlReq("GET", p, null, null, function (e, d) {
     if (e) return cb(e);
     if (!d || !d.token) return cb("token为空");
+    setCachedToken(d.token);
     cb(null, d.token);
   }, 1, label || "取token");
 }
@@ -373,10 +382,8 @@ function pushLatest(pin, cb) {
   step();
 }
 
-// 获取到 pt_key 后：检测到就通知（不再做通知频率控制）
-function maybeNotifyGet(pin, key) {
-  notify("获取ck成功", "pt_pin: " + pin, "pt_key: " + key);
-}
+// 获取到 pt_key 后：不再「每次捕获」都发通知（稳定多次触发会刷屏）；
+// 仅在推送成功/失败时通知一次，成功通知同时告知「CK 获取成功 + 已推送青龙」。
 
 // 推送结果回调：成功/失败的统一处理（含二次复核、失败限频通知）
 function onPushed(pin, ptKey, ok2, msg, skip, pushedKey) {
@@ -385,8 +392,8 @@ function onPushed(pin, ptKey, ok2, msg, skip, pushedKey) {
     var _pk = pushedKey || ptKey;   // 实际落地到青龙的 key（并发补推时可能是比本次捕获更新的 key）
     setLastKey(pin, _pk);
     log("- 推送结果：成功（" + msg + "）");
-    log("- 已发送「ck推送青龙成功」通知。");
-    notify("ck推送青龙成功", "pt_pin: " + pin, msg + " | pt_key: " + _pk);
+    log("- 已发送「CK获取并推送青龙成功」通知（pt_key 已打码）。");
+    notify("CK获取并推送青龙成功", "pt_pin: " + pin, "CK获取成功，已推送青龙 | " + msg + " | pt_key: " + maskKey(_pk));
     // 二次复核：重新拉取青龙确认最新 pt_key 已落地，消除“日志失败但青龙已更新”的歧义
     getToken("复核取token", function (e, tok) {
       if (e) { log("- 二次复核：取 token 失败（" + e + "），无法确认；以青龙侧实际为准。"); log(""); return finish(); }
@@ -458,9 +465,10 @@ function run() {
   // 每次捕获都记录“最新看到的 pt_key”，供单飞锁在并发期间补推最新值（确保最终落地的是最新 key，不会被旧 key 反序覆盖）
   setCap(ptPin, ptKey);
 
-  // 比对 pt_key 的值：仅用于日志展示「是否发生变化」，不再据此跳过推送（开启「推送青龙」即强制推送）
+  // 比对 pt_key 的值：与 decidePush 同源，以「最新捕获值」为准，仅用于日志展示
   var _stored = getLastKey(ptPin);
-  var _changed = !!(ptKey && _stored !== ptKey);
+  var _capNow = getCap(ptPin);
+  var _changed = !!(_capNow && _stored !== _capNow);
 
   // 首行空行 + 当前版本
   log("");
@@ -473,10 +481,7 @@ function run() {
   log("- CK值：pt_key=" + ptKey + ",pt_pin=" + ptPin + "。");
   log("");
 
-  // （已移除“pt_key未变化”心跳分支：开启「推送青龙」即对每次捕获强制推送，不再因同值而跳过）
-
-  // 获取到 pt_key 的通知：检测到就通知（不做频率控制）
-  maybeNotifyGet(ptPin, ptKey);
+  // （已移除「每次捕获」的「获取ck成功」通知：改为仅在推送成功/失败时通知，避免多次触发刷屏）
 
   // 先判开关：推送青龙=关 → 仅抓取，不进入任何推送/限流逻辑（避免误报“限流”，也不污染节流计时）
   if (!ENABLE_PUSH) {
@@ -531,4 +536,5 @@ function run() {
 
 try { run(); } catch (e) {
   try { var m = (e && e.message) ? e.message : String(e); log("脚本异常：" + (e && e.stack ? e.stack : m)); } catch (e2) {}
+  finish(); // 确保 $done 触发，避免异常时干等到脚本 60s 超时
 }
