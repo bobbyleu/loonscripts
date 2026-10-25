@@ -10,7 +10,7 @@
 |---|---|
 | `qdck_ql.plugin` | Loon 插件（含参数面板、MITM、抓取钩子） |
 | `qdck_ql.js` | 推送脚本（被插件引用） |
-| `qdck_test.js` | 本地沙箱测试（模拟 Loon + 青龙 OpenAPI，44 项断言） |
+| `qdck_test.js` | 本地沙箱测试（模拟 Loon + 青龙 OpenAPI，52 项断言） |
 
 ## 一、青龙侧准备（一次性）
 
@@ -26,19 +26,35 @@
    `https://raw.githubusercontent.com/bobbyleu/loonscripts/main/qdck/qdck_ql.plugin`
    （或下载本仓库文件后本地导入）。
 2. 确保 MITM 证书已安装并信任，`h5.if.qidian.com` 已加入 MITM hostname（插件导入会自动追加）。
-3. 点开插件/脚本参数面板，填写：
+3. 点开插件/脚本参数面板，按三组填写：
+
+**第一组 · 青龙凭证**
 
 | 参数 | 说明 |
 |---|---|
 | `CLIENT_ID` / `CLIENT_SECRET` | 青龙应用密钥（见上） |
 | `QL_URL` | 青龙地址，如 `https://ql.your-domain.com`（手机需能访问；Tailscale / cloudflared / 局域网均可） |
-| `PUSH` | 推送开关：开=获取到 Cookie 即推送；关=仅抓取不推送（为关时不写青龙，也不同步开关） |
-| `RUN_SIGN` | 触发开关：开=推送成功后立即执行青龙签到任务；关=只更新变量 |
-| `TASK_KEY` | 签到任务匹配关键词，按青龙任务 **command** 包含该字符串定位，默认 `qdreader` |
-| `ADV_JOB` / `EXTRA_ADV_JOB` / `LOTTERY` / `WEEKLY_EXCHANGE` / `CHAPTER_CARD` / `MESSAGE_BOX` | 任务开关（激励任务 / 每日任务 / 每日抽奖 / 每周兑换 / 章节卡片 / 大咖荐书），除大咖荐书外默认开；每次推送前同步写入青龙 `QDREADER_*_ENABLE` 变量 |
 | `CF_ACCESS_ID` / `CF_ACCESS_SECRET` | Cloudflare Access 服务令牌（可选，青龙域名在 CF Access 后面时填写） |
 
-> Cookie 变量名固定为 `QDREADER_COOKIE`，无需配置。
+**第二组 · 起点任务开关**（每次推送前同步写入青龙同名变量）
+
+| 参数 | 青龙变量 | 默认 |
+|---|---|---|
+| `ADV_JOB` | `QDREADER_ADV_JOB_ENABLE`（激励任务） | 开 |
+| `EXTRA_ADV_JOB` | `QDREADER_EXTRA_ADV_JOB_ENABLE`（每日任务） | 开 |
+| `LOTTERY` | `QDREADER_LOTTERY_ENABLE`（每日抽奖） | 开 |
+| `WEEKLY_EXCHANGE` | `QDREADER_WEEKLY_EXCHANGE_ENABLE`（每周兑换） | 开 |
+| `CHAPTER_CARD` | `QDREADER_CHAPTER_CARD_ENABLE`（章节卡片） | 开 |
+| `MESSAGE_BOX` | `QDREADER_MESSAGE_BOX_ENABLE`（大咖荐书） | 关 |
+
+**第三组 · 行为开关**
+
+| 参数 | 说明 |
+|---|---|
+| `PUSH` | 推送开关：开=获取到 Cookie 即推送；关=仅抓取不推送（也不写青龙、不同步开关） |
+| `RUN_SIGN` | 触发开关：开=推送成功后立即执行青龙签到任务；关=只更新变量 |
+
+> Cookie 变量名固定为 `QDREADER_COOKIE`；签到任务按命令含 `qdreader` 自动匹配（如 `task qdreader.js`），均无需配置。
 
 4. 打开起点读书 App（触发一次 `getlogininfo` 请求），查看 Loon 日志确认推送结果。
 
@@ -50,7 +66,9 @@
    ▼  Loon http-response 钩子
 ① 校验登录：cookie 必须同时含 ywKey 与 ywGuid，否则跳过（防止坏 cookie 覆盖好 cookie）
 ② 计算 uid：base64解码(QDHeader).split('|')[11] → 回退 cookie 的 uid 字段 → 回退响应体 Data.UserId
-③ 同步任务开关：按插件设置写入青龙 QDREADER_*_ENABLE（没有则新建并启用，已有则更新 value 与备注，备注=任务名，已是最新则跳过）
+③ 持锁（单飞锁）后同步任务开关：按插件设置写入青龙 QDREADER_*_ENABLE
+     （没有则新建并启用，已有则更新 value 与备注，备注=任务名，已是最新则跳过；
+       5 分钟内同步成功过则整体跳过；并发触发只由持锁实例同步一次）
 ④ 读青龙现值：GET /open/envs?searchValue=QDREADER_COOKIE
 ⑤ 合并写回：
      现值 {"uidA":"cookieA"} + 本次 uidB  →  {"uidA":"cookieA","uidB":"cookieB"}
@@ -58,7 +76,7 @@
      现值非 JSON（手填过原始 cookie）      →  原值备份到 <uid>_backup 键，不清空
      变量不存在                            →  POST /open/envs 新建
 ⑥ 二次复核：重新拉取变量，确认 map[uid] === 最新 cookie
-⑦ RUN_SIGN=开 → GET /open/crons 找 command 含 TASK_KEY 且已启用的任务
+⑦ RUN_SIGN=开 → GET /open/crons 找 command 含 qdreader 且已启用的任务
               → PUT /open/crons/run [任务id]  立即执行签到
 ```
 
@@ -74,13 +92,15 @@
 ## 五、本地测试
 
 ```bash
-node qdck_test.js   # 44 项断言：跳过/新建/合并/更新/备份/开关同步/默认值/回退等
+node qdck_test.js   # 52 项断言：跳过/新建/合并/更新/备份/开关同步/节流/并发/默认值/回退等
 ```
 
 ## 六、常见问题
 
-- **日志提示「未找到命令包含 qdreader 的任务」**：青龙任务命令里需含 `qdreader`（如 `task qdreader.js`）；若你的任务名不同，改插件参数 `TASK_KEY`。
+- **日志提示「未找到命令包含 qdreader 的任务」**：青龙任务命令里需含 `qdreader`（如 `task qdreader.js`）。
 - **推送成功但签到没跑**：确认 `RUN_SIGN` 开关为开，且青龙任务状态是「启用」（`status=0`，已停用的任务不会触发）。
+- **两次触发后日志出现网络超时重试**：开关同步已在单飞锁内执行 + 5 分钟节流，两次触发只有一个实例同步开关；同一账号 30 秒内重复触发会被推送节流直接跳过。若仍超时，检查手机到青龙的链路（cloudflared 是否在线）。
+- **改了插件开关但青龙变量没变**：开关同步有 5 分钟节流（成功后计时），最快 5 分钟内生效；同步失败不记节流，下次触发重试。
 - **青龙里所有任务都提示「开关未开启，跳过」**：本插件每次推送前会按参数面板同步 6 个 `QDREADER_*_ENABLE` 变量（没有则新建、已有则更新）；确认插件参数里对应开关为开，并查看 Loon 日志中「任务开关」小节的 ✅/⚠️ 行。
 - **开关变量在青龙被手动改过**：下次推送时插件会按自己的设置覆盖回去；想长期改行为请改插件参数，不要在青龙侧手改（会被同步覆盖）。
 - **青龙变量被手填过原始 cookie**：脚本会自动备份到 `<uid>_backup` 键并告警，不会清空；确认无误后可手动删除该备份键。

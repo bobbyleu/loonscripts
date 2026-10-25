@@ -12,7 +12,7 @@
 //   QL_URL                   : 青龙面板地址（**无默认值，必须由用户在插件参数填写**，如 https://your-domain.com）
 //   PUSH                     : 推送青龙（true=获取到Cookie即推送 / false=仅抓取不推送）
 //   RUN_SIGN                 : 推送后触发青龙签到任务（true=推送成功后立即执行签到任务 / false=只更新变量）
-//   TASK_KEY                 : 青龙签到任务的匹配关键词（按任务 command 包含该字符串定位，默认 qdreader）
+//   TASK_KEY                 : （已移除）签到任务按命令含 qdreader 固定匹配，如 task qdreader.js
 //   ADV_JOB / EXTRA_ADV_JOB / LOTTERY / WEEKLY_EXCHANGE / CHAPTER_CARD / MESSAGE_BOX
 //                            : 任务开关（激励任务/每日任务/每日抽奖/每周兑换/章节卡片/大咖荐书，除大咖荐书外默认开），
 //                              每次推送前按此处设置同步写入青龙 QDREADER_*_ENABLE 变量：青龙没有则新建，已有则更新
@@ -26,9 +26,9 @@ var WHITELIST_MODE = false;                   // true=仅白名单内 uid 写入
 var UID_WHITELIST = [];                       // 白名单 uid，如 ["123456","789012"]
 var PUSH_GAP = 30 * 1000;                     // 同一 uid 两次推送尝试的最小间隔(防高频)：突发多次捕获只推一次，也防失败高频重试
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
-var VERSION = "V1.01";
+var VERSION = "V1.02";
 var QL_ENV_NAME = "QDREADER_COOKIE";          // 青龙 Cookie 环境变量名（固定值）
-var QL_TASK_KEY = "qdreader";                 // 青龙签到任务匹配关键词（默认值，可被插件参数 TASK_KEY 覆盖）
+var QL_TASK_KEY = "qdreader";                 // 青龙签到任务匹配关键词（固定值：任务命令含 qdreader 即命中，如 task qdreader.js）
 var UID_SPLIT_INDEX = 11;                     // base64(QDHeader).split('|') 中 uid 的下标（与主脚本一致）
 var BUSY_TTL = 110 * 1000;                    // 全局单飞锁有效期(ms)：一次完整推送(含复核/触发)可能跨多次网络往返，留足时间
 var DEBOUNCE_MS = 4000;                       // 相同Cookie的缓冲窗口(ms)：等待后续是否出现更新 cookie；窗口内无更新则按设置强制推送当前值
@@ -47,7 +47,7 @@ function parseArgs() {
   function absorb(o) {
     if (!o || typeof o !== "object") return;
     if (Array.isArray(o)) {
-      var names = ["CLIENT_ID", "CLIENT_SECRET", "QL_URL", "PUSH", "RUN_SIGN", "TASK_KEY", "ADV_JOB", "EXTRA_ADV_JOB", "LOTTERY", "WEEKLY_EXCHANGE", "CHAPTER_CARD", "MESSAGE_BOX", "CF_ACCESS_ID", "CF_ACCESS_SECRET"];
+      var names = ["CLIENT_ID", "CLIENT_SECRET", "QL_URL", "CF_ACCESS_ID", "CF_ACCESS_SECRET", "ADV_JOB", "EXTRA_ADV_JOB", "LOTTERY", "WEEKLY_EXCHANGE", "CHAPTER_CARD", "MESSAGE_BOX", "PUSH", "RUN_SIGN"];
       o.forEach(function (v, idx) {
         if (names[idx] && v !== undefined && v !== null) map[names[idx]] = String(v).trim();
       });
@@ -82,8 +82,8 @@ function parseArgs() {
           }
         });
       } else if (s) {
-        // 逗号占位式 id,secret,url,true,true,qdreader,true,true,true,true,true,false
-        var names2 = ["CLIENT_ID", "CLIENT_SECRET", "QL_URL", "PUSH", "RUN_SIGN", "TASK_KEY", "ADV_JOB", "EXTRA_ADV_JOB", "LOTTERY", "WEEKLY_EXCHANGE", "CHAPTER_CARD", "MESSAGE_BOX", "CF_ACCESS_ID", "CF_ACCESS_SECRET"];
+        // 逗号占位式 id,secret,url,cfid,cfsec,true,true,true,true,true,false,true,true
+        var names2 = ["CLIENT_ID", "CLIENT_SECRET", "QL_URL", "CF_ACCESS_ID", "CF_ACCESS_SECRET", "ADV_JOB", "EXTRA_ADV_JOB", "LOTTERY", "WEEKLY_EXCHANGE", "CHAPTER_CARD", "MESSAGE_BOX", "PUSH", "RUN_SIGN"];
         s.split(",").forEach(function (v, idx) {
           v = v.trim();
           if (/^\{.*\}$/.test(v)) return; // 未替换的占位符，跳过
@@ -130,10 +130,7 @@ if (QL_URL) {
 }
 if (_argUrl) sSet("QDCK_URL", QL_URL);
 
-// 任务关键词：参数优先，缺省用内置默认（Cookie 变量名固定为 QDREADER_COOKIE）
-var _argTaskKey = getArg("TASK_KEY", "");
-QL_TASK_KEY = _argTaskKey ? _argTaskKey : (sGet("QDCK_TASKKEY") || QL_TASK_KEY);
-if (_argTaskKey) sSet("QDCK_TASKKEY", _argTaskKey);
+// 任务关键词固定为 qdreader（任务命令 task qdreader.js 即命中），无插件参数
 
 // Cloudflare Access 服务令牌（Service Auth）：给所有青龙请求加 CF-Access-* 头，
 // 即便隧道域名泄露，无令牌请求在 Cloudflare 边缘即被拒。通过插件参数 CF_ACCESS_ID / CF_ACCESS_SECRET 输入。
@@ -193,20 +190,46 @@ function syncOneSwitch(t, sw, val, cb) {
   }, 1, "查开关");
 }
 
-// 串行同步全部开关（避免并发写青龙），全部完成后回调
+// 串行同步全部开关（避免并发写青龙），全部完成后回调 failCount（失败个数）。
+// 单个开关失败不中断：其余继续同步，Cookie 推送也不受影响。
 function syncEnvSwitches(t, cb) {
-  var i = 0;
+  var i = 0, fails = 0;
   function next() {
-    if (i >= ENV_SWITCHES.length) return cb();
+    if (i >= ENV_SWITCHES.length) return cb(fails);
     var sw = ENV_SWITCHES[i];
     i++;
     var val = parseBool(getArg(sw.arg, sw.def ? "true" : "false"), sw.def);
     syncOneSwitch(t, sw, val, function (ok, msg) {
+      if (!ok) fails++;
       log("  " + (ok ? "✅ " : "⚠️ ") + msg);
       next();
     });
   }
   next();
+}
+
+// 开关同步节流：5 分钟内同步成功过则跳过（两次触发只同步一次，避免并发打青龙）；
+// 由持锁实例（单飞锁内）调用，天然串行；有失败则不记录节流时间，下次触发重试。
+var K_SWSYNC = "QDCK_SWSYNC";               // 上次开关同步成功的时间戳(ms)
+var SW_SYNC_GAP = 5 * 60 * 1000;            // 开关同步最小间隔(ms)：5 分钟
+function maybeSyncSwitches(cb) {
+  var last = Number(sGet(K_SWSYNC) || "0");
+  if (last && Date.now() - last < SW_SYNC_GAP) {
+    log("- 任务开关：" + Math.round((Date.now() - last) / 1000) + " 秒前刚同步过，跳过（" + (SW_SYNC_GAP / 60000) + " 分钟节流，改插件开关后最快 " + (SW_SYNC_GAP / 60000) + " 分钟内生效）。");
+    return cb();
+  }
+  getToken("同步开关", function (e, tok) {
+    if (e) {
+      log("- 任务开关同步：跳过（取 token 失败：" + e + "），不影响 Cookie 推送。");
+      return cb();
+    }
+    log("- 任务开关：按插件设置同步至青龙环境变量（没有则新建，已有则更新，备注为任务名）：");
+    syncEnvSwitches(tok, function (fails) {
+      if (fails === 0) sSet(K_SWSYNC, String(Date.now())); // 全部成功才记节流时间；有失败则下次触发继续重试
+      else log("- 任务开关：有 " + fails + " 个同步失败，不记节流，下次触发继续重试。");
+      cb();
+    });
+  });
 }
 
 // ========== 持久化键 ==========
@@ -577,6 +600,8 @@ function pickNextPending(preferUid) {
 }
 
 // 推送闭环：串行推送所有待推送账号 → 二次复核 → 按开关触发签到任务 → 通知。
+// 持锁后先同步任务开关（带 5min 节流），再进行各轮 cookie 推送——
+// 这样两次触发只会有一个实例做开关同步，杜绝并发重复请求青龙导致的超时。
 // cb(ok, msg, skip, pushedCookie)：pushedCookie 为触发账号实际落地的 cookie。
 function pushLatest(uid, cb) {
   var _busy = getBusy();
@@ -585,32 +610,34 @@ function pushLatest(uid, cb) {
     return cb(false, "并发突发：已有推送在进行，最新值已记录，将由持锁实例续推", true, null);
   }
   setBusy();
-  var rounds = 0;
-  var anyOk = false, pushedCookie = null, lastMsg = "";
-  function step() {
-    rounds++;
-    var t = pickNextPending(uid);
-    if (!t) {
-      clearBusy();
-      return cb(anyOk, lastMsg || "无待推送账号", false, pushedCookie);
-    }
-    pushCookie(t.uid, t.cookie, function (ok, msg) {
-      if (ok) {
-        setLastKey(t.uid, t.cookie);
-        anyOk = true; lastMsg = msg;
-        if (t.uid === uid) pushedCookie = t.cookie;
-        log("- 账号 uid=" + t.uid + "：" + msg);
-      } else {
-        lastMsg = msg;
-        log("- 账号 uid=" + t.uid + " 推送失败：" + msg);
+  maybeSyncSwitches(function () {
+    var rounds = 0;
+    var anyOk = false, pushedCookie = null, lastMsg = "";
+    function step() {
+      rounds++;
+      var t = pickNextPending(uid);
+      if (!t) {
+        clearBusy();
+        return cb(anyOk, lastMsg || "无待推送账号", false, pushedCookie);
       }
-      var next = pickNextPending(uid);
-      if (next && rounds < MAX_ROUNDS) { step(); return; }
-      clearBusy();
-      cb(anyOk, lastMsg, false, pushedCookie);
-    });
-  }
-  step();
+      pushCookie(t.uid, t.cookie, function (ok, msg) {
+        if (ok) {
+          setLastKey(t.uid, t.cookie);
+          anyOk = true; lastMsg = msg;
+          if (t.uid === uid) pushedCookie = t.cookie;
+          log("- 账号 uid=" + t.uid + "：" + msg);
+        } else {
+          lastMsg = msg;
+          log("- 账号 uid=" + t.uid + " 推送失败：" + msg);
+        }
+        var next = pickNextPending(uid);
+        if (next && rounds < MAX_ROUNDS) { step(); return; }
+        clearBusy();
+        cb(anyOk, lastMsg, false, pushedCookie);
+      });
+    }
+    step();
+  });
 }
 
 // 通知策略（避免多次触发刷屏）：
@@ -818,20 +845,8 @@ function run() {
 
   log("2、推送Cookie至青龙面板。");
   log("- 目标=" + hostOf(QL_URL) + " | 变量=" + QL_ENV_NAME + " | 触发签到=" + (ENABLE_RUN_SIGN ? "开" : "关") + " | 出站=" + QL_HTTP_NODE + (QL_ACCESS_ID ? " | CloudflareAccess=开" : " | CloudflareAccess=关"));
-  // 先按插件设置同步任务开关至青龙环境变量（没有则新建、已有则更新），再进入 Cookie 推送流程
-  getToken("同步开关", function (e, tok) {
-    if (e) {
-      log("- 任务开关同步：跳过（取 token 失败：" + e + "），不影响 Cookie 推送。");
-      log("");
-      decidePush(uid, cookie);
-      return;
-    }
-    log("- 任务开关：按插件设置同步至青龙环境变量（没有则新建，已有则更新，备注为任务名）：");
-    syncEnvSwitches(tok, function () {
-      log("");
-      decidePush(uid, cookie);
-    });
-  });
+  // 任务开关同步在单飞锁内进行（pushLatest 持锁后），两次触发只会有一个实例同步，避免并发超时
+  decidePush(uid, cookie);
   return;
 }
 

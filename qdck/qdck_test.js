@@ -26,8 +26,14 @@ function makeCookie(uid, extra) {
 function makeQL(initial) {
   const state = {
     envs: (initial && initial.envs) || [],
+    crons: (initial && initial.crons) || [
+      { id: 1, command: "task qdreader.js", name: "起点读书签到", status: 0, schedule: "5 8 * * *" },
+      { id: 2, command: "task jd_CheckCK.js", name: "京东CK兜底", status: 0, schedule: "0 3 * * *" },
+      { id: 3, command: "task qdreader.js", name: "起点读书签到(已停用)", status: 1, schedule: "0 4 * * *" }
+    ],
     nextId: 100,
     triggered: [],
+    posts: [],
     log: []
   };
   const routes = {
@@ -47,6 +53,7 @@ function makeQL(initial) {
     },
     "POST /open/envs": (q, body) => {
       const arr = Array.isArray(body) ? body : [body];
+      state.posts.push(...arr.map(u => u.name));
       const created = arr.map(u => {
         const e = { id: state.nextId++, name: u.name, value: u.value, status: 0, remarks: u.remarks || "" };
         state.envs.push(e);
@@ -61,13 +68,7 @@ function makeQL(initial) {
       });
       return { code: 200, data: null };
     },
-    "GET /open/crons": () => ({
-      code: 200, data: [
-        { id: 1, command: "task qdreader.js", name: "起点读书签到", status: 0, schedule: "11 2 * * *" },
-        { id: 2, command: "task jd_CheckCK.js", name: "京东CK兜底", status: 0, schedule: "0 3 * * *" },
-        { id: 3, command: "task qdreader.js", name: "起点读书签到(已停用)", status: 1, schedule: "0 4 * * *" }
-      ]
-    }),
+    "GET /open/crons": () => ({ code: 200, data: state.crons }),
     "PUT /open/crons/run": (q, body) => {
       state.triggered.push(...(Array.isArray(body) ? body : [body]));
       return { code: 200, data: null };
@@ -77,14 +78,15 @@ function makeQL(initial) {
 }
 
 // ---- Loon 环境模拟 ----
+// opts.qlState/opts.qlRoutes：外部共享同一套青龙 mock（并发场景用）；opts.store：外部共享 persistentStore
 function runScenario(name, opts) {
   return new Promise((resolve) => {
-    const ql = makeQL(opts.ql);
+    const ql = (opts.qlState && opts.qlRoutes) ? { state: opts.qlState, routes: opts.qlRoutes } : makeQL(opts.ql);
     const logs = [];
     const notifs = [];
     let doneCalled = false;
 
-    const store = {};
+    const store = opts.store || {};
     const sandbox = {
       console: { log: (...a) => logs.push(a.join(" ")), warn: () => {}, error: () => {}, info: () => {}, debug: () => {} },
       setTimeout: (fn, ms) => setTimeout(fn, ms),
@@ -145,7 +147,7 @@ function check(desc, cond) {
 }
 
 (async function main() {
-  const ARG = { CLIENT_ID: "id", CLIENT_SECRET: "sec", QL_URL: "http://ql.local", PUSH: "true", RUN_SIGN: "true", TASK_KEY: "qdreader", ADV_JOB: "true", EXTRA_ADV_JOB: "true", LOTTERY: "true", WEEKLY_EXCHANGE: "true", CHAPTER_CARD: "true", MESSAGE_BOX: "true" };
+  const ARG = { CLIENT_ID: "id", CLIENT_SECRET: "sec", QL_URL: "http://ql.local", PUSH: "true", RUN_SIGN: "true", ADV_JOB: "true", EXTRA_ADV_JOB: "true", LOTTERY: "true", WEEKLY_EXCHANGE: "true", CHAPTER_CARD: "true", MESSAGE_BOX: "true" };
 
   // ===== 场景1：请求无 Cookie → 直接跳过 =====
   console.log("\n===== 场景1：无 Cookie =====");
@@ -245,12 +247,15 @@ function check(desc, cond) {
   check("未触发签到任务", r.ql.triggered.length === 0);
   check("日志说明跳过触发", r.logs.some(l => l.indexOf("推送后触发签到=关") >= 0));
 
-  // ===== 场景8：TASK_KEY 无匹配任务 → 不影响推送成功 =====
+  // ===== 场景8：青龙没有含 qdreader 的任务 → 不影响推送成功 =====
   console.log("\n===== 场景8：无匹配任务 =====");
   r = await runScenario("no-task", {
-    argument: Object.assign({}, ARG, { TASK_KEY: "notexist" }),
+    argument: ARG,
     request: { headers: { Cookie: makeCookie("80008") } },
-    ql: { envs: [{ id: 59, name: "QDREADER_COOKIE", value: "{}", status: 0, remarks: "" }] },
+    ql: {
+      envs: [{ id: 59, name: "QDREADER_COOKIE", value: "{}", status: 0, remarks: "" }],
+      crons: [{ id: 9, command: "task other.js", name: "其他任务", status: 0, schedule: "0 5 * * *" }]
+    },
     wait: 9000
   });
   check("变量已更新", (() => { try { const m = JSON.parse(r.ql.envs.find(e => e.id === 59).value); return !!m["80008"]; } catch (e) { return false; } })());
@@ -346,6 +351,53 @@ function check(desc, cond) {
   });
   check("忽略传入的 ENV_NAME，仍写 QDREADER_COOKIE", r.ql.envs.some(e => e.name === "QDREADER_COOKIE") && !r.ql.envs.some(e => e.name === "SHOULD_BE_IGNORED"));
   check("cookie 已写入 QDREADER_COOKIE", (() => { try { const m = JSON.parse(r.ql.envs.find(e => e.id === 74).value); return !!m["16016"]; } catch (e) { return false; } })());
+
+  // ===== 场景16：两个账号先后触发（并发） → 开关只同步一轮 + 锁挡第二个 + 持锁者续推 =====
+  console.log("\n===== 场景16：多账号并发（开关只同步一次） =====");
+  {
+    const sharedQL = makeQL({ envs: [{ id: 80, name: "QDREADER_COOKIE", value: "{}", status: 0, remarks: "" }] });
+    const sharedStore = {};
+    // 两个实例几乎同时启动（不同 uid），共享 persistentStore 与青龙 mock：模拟两个账号同时打开 App
+    const pA = runScenario("concurrent-a", {
+      argument: ARG, request: { headers: { Cookie: makeCookie("17017") } },
+      qlState: sharedQL.state, qlRoutes: sharedQL.routes, store: sharedStore, wait: 15000
+    });
+    const pB = runScenario("concurrent-b", {
+      argument: ARG, request: { headers: { Cookie: makeCookie("17118") } },
+      qlState: sharedQL.state, qlRoutes: sharedQL.routes, store: sharedStore, wait: 15000
+    });
+    const ra = await pA, rb = await pB;
+    const allLogs = ra.logs.join("\n") + "\n" + rb.logs.join("\n");
+    const swPosts = sharedQL.state.posts.filter(n => n !== "QDREADER_COOKIE");
+    check("开关 POST 只发生一轮（6 次）", swPosts.length === 6);
+    check("实例 B 被单飞锁挡下（日志含并发突发）", allLogs.indexOf("并发突发") >= 0);
+    check("开关同步日志只出现一次", (allLogs.match(/按插件设置同步至青龙环境变量/g) || []).length === 1);
+    check("两个账号 cookie 都已写入（持锁实例续推）", (() => {
+      try {
+        const m = JSON.parse(sharedQL.state.envs.find(e => e.id === 80).value);
+        return !!m["17017"] && !!m["17118"];
+      } catch (e) { return false; }
+    })());
+  }
+
+  // ===== 场景17：开关节流（5min 内第二次触发不重复同步） =====
+  console.log("\n===== 场景17：开关节流 =====");
+  {
+    const sharedStore2 = {};
+    const r17a = await runScenario("throttle-a", {
+      argument: ARG, request: { headers: { Cookie: makeCookie("18018") } },
+      ql: { envs: [] }, store: sharedStore2, wait: 12000
+    });
+    // 第二次触发用不同 cookie（绕过 30s 推送节流），专测开关节流
+    const r17b = await runScenario("throttle-b", {
+      argument: ARG, request: { headers: { Cookie: makeCookie("18018", "extra=newvalue") } },
+      ql: { envs: [] }, store: sharedStore2, wait: 12000
+    });
+    check("第一次同步成功", r17a.logs.some(l => l.indexOf("按插件设置同步至青龙环境变量") >= 0));
+    check("第二次被开关节流跳过", r17b.logs.some(l => l.indexOf("秒前刚同步过，跳过") >= 0));
+    check("第二次无开关 POST", r17b.ql.posts.filter(n => n !== "QDREADER_COOKIE").length === 0);
+    check("第二次 cookie 仍正常推送", r17b.ql.posts.indexOf("QDREADER_COOKIE") >= 0);
+  }
 
   console.log("\n========================================");
   console.log("结果：" + pass + " 通过 / " + fail + " 失败");
