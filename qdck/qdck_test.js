@@ -34,12 +34,20 @@ function makeQL(initial) {
     nextId: 100,
     triggered: [],
     posts: [],
-    log: []
+    log: [],
+    envGets: 0,                                                   // GET /open/envs 调用次数（验证 V1.04 合并查询）
+    failPostEnvs: !!(initial && initial.failPostEnvs),            // 注入：POST /open/envs 全部失败（模拟开关同步网络故障）
+    failEnvsGet: !!(initial && initial.failEnvsGet)               // 注入：GET /open/envs 全部失败
   };
   const routes = {
     "GET /open/auth/token": (q) => ({ code: 200, data: { token: "mock-token", token_type: "Bearer", expiration: 3600 } }),
+    // V1.04 起开关同步用「无 searchValue 的全量查询」，mock 必须返回全部变量
     "GET /open/envs": (q) => {
-      const sv = decodeURIComponent((q.match(/searchValue=([^&]*)/) || [])[1] || "");
+      state.envGets++;
+      if (state.failEnvsGet) return { __error: "HTTPClient request failed with error: Request timeout." };
+      const m = q.match(/searchValue=([^&]*)/);
+      if (!m) return { code: 200, data: state.envs };
+      const sv = decodeURIComponent(m[1] || "");
       const list = state.envs.filter(e => e.name === sv);
       return { code: 200, data: list };
     },
@@ -52,6 +60,7 @@ function makeQL(initial) {
       return { code: 200, data: null };
     },
     "POST /open/envs": (q, body) => {
+      if (state.failPostEnvs) return { __error: "青龙返回 HTTP 500（非网络错误，不触发重试）" };
       const arr = Array.isArray(body) ? body : [body];
       state.posts.push(...arr.map(u => u.name));
       const created = arr.map(u => {
@@ -122,6 +131,8 @@ function runScenario(name, opts) {
         let body = null;
         if (o.body) { try { body = JSON.parse(o.body); } catch (e) {} }
         const data = fn(p.split("?")[1] || "", body);
+        // 注入失败：路由返回 __error 即模拟 httpClient 报错（含 timeout 字样才会触发脚本重试）
+        if (data && data.__error) return cb(data.__error, null, null);
         cb(null, { status: 200 }, JSON.stringify(data));
       }, 5);
     }
@@ -457,6 +468,55 @@ function check(desc, cond) {
     check("同值不重复通知（无成功通知）", !r19.notifs.some(n => n.title === "起点Cookie推送青龙成功"));
     check("无失败通知", !r19.notifs.some(n => n.title === "起点Cookie推送青龙失败"));
     check("签到任务已触发", JSON.stringify(r19.ql.triggered) === "[1]");
+  }
+
+  // ===== 场景20：合并查询（V1.04）— 开关同步只发 1 次全量 GET，已是最新值零写入 =====
+  console.log("\n===== 场景20：开关同步合并查询 =====");
+  {
+    const ck20 = makeCookie("24024");
+    const swNames = [
+      ["QDREADER_ADV_JOB_ENABLE", "激励任务"], ["QDREADER_EXTRA_ADV_JOB_ENABLE", "每日任务"],
+      ["QDREADER_LOTTERY_ENABLE", "每日抽奖"], ["QDREADER_WEEKLY_EXCHANGE_ENABLE", "每周兑换"],
+      ["QDREADER_CHAPTER_CARD_ENABLE", "章节卡片"], ["QDREADER_MESSAGE_BOX_ENABLE", "大咖荐书"]
+    ];
+    const pre = [{ id: 96, name: "QDREADER_COOKIE", value: JSON.stringify({ "24024": "old-cookie" }), status: 0, remarks: "" }];
+    swNames.forEach((s, i) => pre.push({ id: 200 + i, name: s[0], value: "true", status: 0, remarks: s[1] }));
+    const r20 = await runScenario("switch-merged-query", {
+      argument: ARG,
+      request: { headers: { Cookie: ck20 } },
+      ql: { envs: pre },
+      wait: 12000
+    });
+    check("开关全部已是最新值（6 条）", (r20.logs.join("\n").match(/已是最新值 true/g) || []).length === 6);
+    check("已是最新值 → 开关零新建零更新", r20.ql.posts.length === 0);
+    check("合并查询：GET /open/envs 共 3 次（推送+复核+同步各1，旧版为8）", r20.ql.envGets === 3);
+    check("同步小结日志存在", r20.logs.some(l => l.indexOf("开关同步小结") >= 0));
+    check("Cookie 仍正常推送（主目标不受影响）", (() => { try { const m = JSON.parse(r20.ql.envs.find(e => e.id === 96).value); return m["24024"] === ck20; } catch (e) { return false; } })());
+    check("签到任务已触发", JSON.stringify(r20.ql.triggered) === "[1]");
+  }
+
+  // ===== 场景21：主目标优先（V1.04）— 开关同步全失败也不影响 Cookie 推送与签到触发 =====
+  console.log("\n===== 场景21：开关同步故障不影响主目标 =====");
+  {
+    const ck21 = makeCookie("25025");
+    // 预置 QDREADER_COOKIE（走 PUT 不 POST），并让 POST /open/envs 全部失败 → 6 个开关新建全失败
+    const r21 = await runScenario("switch-fail-degrade", {
+      argument: ARG,
+      request: { headers: { Cookie: ck21 } },
+      ql: { envs: [{ id: 97, name: "QDREADER_COOKIE", value: JSON.stringify({ "25025": "old-cookie" }), status: 0, remarks: "" }], failPostEnvs: true },
+      wait: 15000
+    });
+    const joined21 = r21.logs.join("\n");
+    const iTrig = r21.logs.reduce((a, l, i) => (l.indexOf("3、触发签到任务") >= 0 ? i : a), -1);
+    const iSync = r21.logs.reduce((a, l, i) => (l.indexOf("按插件设置同步至青龙环境变量") >= 0 ? i : a), -1);
+    check("主目标优先：触发签到排在开关同步之前", iTrig >= 0 && iSync >= 0 && iTrig < iSync);
+    check("Cookie 已推送成功（变量已更新）", (() => { try { const m = JSON.parse(r21.ql.envs.find(e => e.id === 97).value); return m["25025"] === ck21; } catch (e) { return false; } })());
+    check("签到任务已触发", JSON.stringify(r21.ql.triggered) === "[1]");
+    check("成功通知已发送", r21.notifs.some(n => n.title === "起点Cookie推送青龙成功"));
+    check("无失败通知（主目标成功）", !r21.notifs.some(n => n.title === "起点Cookie推送青龙失败"));
+    check("连续失败触发熔断（放弃剩余开关）", joined21.indexOf("熔断放弃剩余") >= 0);
+    check("熔断日志说明不影响已推送与触发", joined21.indexOf("不影响已推送的 Cookie 与签到触发") >= 0);
+    check("脚本正常收尾（$done）", r21.doneCalled === true);
   }
 
   console.log("\n========================================");
