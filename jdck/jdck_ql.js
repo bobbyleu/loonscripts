@@ -17,7 +17,7 @@ var PT_PIN_WHITELIST = [];                    // 白名单 pt_pin，如 ["JD_xxx
 var PUSH_GAP = 30 * 1000;                     // 同一 key 两次推送尝试的最小间隔(防高频)：突发多次捕获只推一次，也防失败高频重试
 // （NOTIFY_OK_GAP 已移除：不再发送“pt_key未变”心跳通知；开启推送即强制推送）
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
-var VERSION = "V1.39";
+var VERSION = "V1.40";
 
 // ========== 参数解析 ==========
 // Loon 3.5.x 的 [Argument] 占位式 argument=[{CLIENT_ID},{...}] 运行期会把 $argument
@@ -394,7 +394,7 @@ function pushLatest(pin, cb) {
 // preLast：本次推送前的「上次已推送 key」基准；仅当实际落地的 key 与它不同（=真的换了 CK）才发成功通知，
 // 相同 CK 的强制推送只静默刷新青龙，避免每次开 App 都通知。
 function onPushed(pin, ptKey, ok2, msg, skip, pushedKey, preLast) {
-  if (skip) { log("- 并发突发：已由其他实例推送最新值，本次跳过。"); log(""); finish(); return; }
+  if (skip) { log("- 并发突发：已由其他实例推送最新值，本次跳过。"); log("- 通知：未发送（由持锁实例负责推送与通知）。"); log(""); finish(); return; }
   if (ok2) {
     var _pk = pushedKey || ptKey;   // 实际落地到青龙的 key（并发补推时可能是比本次捕获更新的 key）
     setLastKey(pin, _pk);
@@ -402,10 +402,10 @@ function onPushed(pin, ptKey, ok2, msg, skip, pushedKey, preLast) {
     log("- 推送结果：成功（" + msg + "）");
     var _isNewCK = !preLast || _pk !== preLast;   // 相对推送前基准：是否真的换了 CK
     if (_isNewCK) {
-      log("- 已发送「CK获取并推送青龙成功」通知（pt_key 已打码）。");
+      log("- 通知：已发送「CK获取并推送青龙成功」（pt_key 已打码）。");
       notify("CK获取并推送青龙成功", "pt_pin: " + pin, "CK获取成功，已推送青龙 | " + msg + " | pt_key: " + maskKey(_pk));
     } else {
-      log("- CK 与上次相同：已按设置强制推送刷新青龙（同值不重复通知，避免刷屏）。");
+      log("- 已按设置强制推送刷新青龙；通知：未发送（青龙已为该 CK，同值不重复提醒，避免刷屏）。");
     }
     // 二次复核：重新拉取青龙确认最新 pt_key 已落地，消除“日志失败但青龙已更新”的歧义
     getToken("复核取token", function (e, tok) {
@@ -428,8 +428,10 @@ function onPushed(pin, ptKey, ok2, msg, skip, pushedKey, preLast) {
     var lastFail = Number(sGet(K_FAIL_NOTIFY) || "0");
     if (Date.now() - lastFail >= NOTIFY_FAIL_GAP) {
       sSet(K_FAIL_NOTIFY, String(Date.now()));
-      log("- 已发送「ck推送青龙失败」通知(限频10min)。");
+      log("- 通知：已发送「ck推送青龙失败」（限频10min）。");
       notify("ck推送青龙失败", "pt_pin: " + pin, _isCF ? "青龙隧道不可达(与脚本无关)" : msg);
+    } else {
+      log("- 通知：未发送（「推送失败」通知处于 10min 限频期内，避免刷屏）。");
     }
     log("");
     finish();
@@ -461,7 +463,8 @@ function decidePush(pin, ptKey) {
         // 窗口内无更新：相同CK按设置强制推送；若该 key 刚推送成功过(PUSH_GAP 内)则无需重复往返
         var _pd = getPushed(pin);
         if (cap2 && _pd.key === cap2 && Date.now() - _pd.t < PUSH_GAP) {
-          log("- 相同CK已于 " + (PUSH_GAP / 1000) + " 秒内推送成功，无需重复推送。");
+          log("- 获取到相同京东CK，" + (PUSH_GAP / 1000) + " 秒内已推送成功，无需重复推送。");
+          log("- 通知：未发送（该 CK 刚推送成功过，无变化）。");
           log("");
           finish();
           return;
@@ -510,6 +513,7 @@ function run() {
   if (!ENABLE_PUSH) {
     log("2、推送CK至青龙面板。");
     log("- " + (_changed ? "获取到不同京东CK" : "获取到相同京东CK") + "，根据设置不推送青龙面板。");
+    log("- 通知：未发送（设置「推送青龙=关」，仅抓取不推送）。");
     log("");
     finish(); return;
   }
@@ -520,7 +524,8 @@ function run() {
   var _lastTryT = Number(sGet(K_TRY) || "0");
   if (_lastTryKey === ptKey && Date.now() - _lastTryT < PUSH_GAP) {
     log("2、推送CK至青龙面板。");
-    log("- 推送节流：同 key " + (PUSH_GAP / 1000) + " 秒内已尝试，本次跳过（先到实例负责推送，值不变无需重复推）。");
+    log("- 获取到相同京东CK，" + (PUSH_GAP / 1000) + " 秒内已推送/尝试过，本次跳过（值不变，无需重复推送）。");
+    log("- 通知：未发送（同 key 节流期内已处理，无变化）。");
     log("");
     finish(); return;
   }
@@ -532,13 +537,14 @@ function run() {
     for (var i = 0; i < PT_PIN_WHITELIST.length; i++) {
       if (PT_PIN_WHITELIST[i] && dPin(String(PT_PIN_WHITELIST[i])) === ptPin) { ok = true; break; }
     }
-    if (!ok) { setLastKey(ptPin, ptKey); log("2、推送CK至青龙面板。"); log("- pt_pin 不在白名单，跳过推送。"); log(""); finish(); return; }
+    if (!ok) { setLastKey(ptPin, ptKey); log("2、推送CK至青龙面板。"); log("- pt_pin 不在白名单，跳过推送。"); log("- 通知：未发送（pt_pin 不在白名单）。"); log(""); finish(); return; }
   }
 
   if (!QL_CLIENT_ID || !QL_CLIENT_SECRET) {
     log("2、推送CK至青龙面板。");
     log("- 青龙凭证未配置，已终止推送。请在 Loon 参数填写 CLIENT_ID / CLIENT_SECRET");
     notify("京东Cookie未推送", "凭证未配置", "Loon脚本参数中填入 CLIENT_ID/CLIENT_SECRET");
+    log("- 通知：已发送「京东Cookie未推送」。");
     log("");
     finish(); return;
   }
@@ -547,6 +553,7 @@ function run() {
     log("2、推送CK至青龙面板。");
     log("- 青龙地址(QL_URL)未填写，已终止推送。请在插件参数填写 QL_URL");
     notify("京东Cookie未推送", "青龙地址未配置", "Loon插件参数中填入 QL_URL");
+    log("- 通知：已发送「京东Cookie未推送」。");
     log("");
     finish(); return;
   }
