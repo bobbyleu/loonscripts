@@ -26,10 +26,12 @@ function makeCookie(uid, extra) {
 function makeQL(initial) {
   const state = {
     envs: (initial && initial.envs) || [],
+    // 定时任务 status 按青龙 CrontabStatus 枚举：0=运行中 1=已启用(空闲) 2=已禁用 3=排队中
+    // （注意与环境变量 status 不同：envs 是 0=启用/1=禁用）
     crons: (initial && initial.crons) || [
-      { id: 1, command: "task qdreader.js", name: "起点读书签到", status: 0, schedule: "5 8 * * *" },
-      { id: 2, command: "task jd_CheckCK.js", name: "京东CK兜底", status: 0, schedule: "0 3 * * *" },
-      { id: 3, command: "task qdreader.js", name: "起点读书签到(已停用)", status: 1, schedule: "0 4 * * *" }
+      { id: 1, command: "task bobbyleu_dailycheckin/qdreader.js", name: "起点读书签到", status: 1, schedule: "5 8 * * *" },
+      { id: 2, command: "task jd_CheckCK.js", name: "京东CK兜底", status: 1, schedule: "0 3 * * *" },
+      { id: 3, command: "task bobbyleu_dailycheckin/qdreader.js", name: "起点读书签到(已禁用)", status: 2, schedule: "0 4 * * *" }
     ],
     nextId: 100,
     triggered: [],
@@ -194,7 +196,7 @@ function check(desc, cond) {
   check("Cookie 变量已新建", !!ckEnv3);
   check("value 为 JSON 单键值对且含 uid=10001", (() => { try { const m = JSON.parse(ckEnv3.value); return m["10001"] === ck3 && Object.keys(m).length === 1; } catch (e) { return false; } })());
   check("6 个任务开关变量已同步新建", ["QDREADER_ADV_JOB_ENABLE","QDREADER_EXTRA_ADV_JOB_ENABLE","QDREADER_LOTTERY_ENABLE","QDREADER_WEEKLY_EXCHANGE_ENABLE","QDREADER_CHAPTER_CARD_ENABLE","QDREADER_MESSAGE_BOX_ENABLE"].every(n => r.ql.envs.some(e => e.name === n)));
-  check("签到任务已触发（仅 status=0 的 qdreader）", JSON.stringify(r.ql.triggered) === "[1]");
+  check("签到任务已触发（status=1 已启用的 qdreader，status=2 已禁用者被跳过）", JSON.stringify(r.ql.triggered) === "[1]");
   check("发送成功通知", r.notifs.some(n => n.title === "起点Cookie推送青龙成功"));
   check("日志含二次复核✅", r.logs.some(l => l.indexOf("二次复核：✅") >= 0));
 
@@ -268,12 +270,13 @@ function check(desc, cond) {
     request: { headers: { Cookie: makeCookie("80008") } },
     ql: {
       envs: [{ id: 59, name: "QDREADER_COOKIE", value: "{}", status: 0, remarks: "" }],
-      crons: [{ id: 9, command: "task other.js", name: "其他任务", status: 0, schedule: "0 5 * * *" }]
+      crons: [{ id: 9, command: "task other.js", name: "其他任务", status: 1, schedule: "0 5 * * *" }]
     },
     wait: 9000
   });
   check("变量已更新", (() => { try { const m = JSON.parse(r.ql.envs.find(e => e.id === 59).value); return !!m["80008"]; } catch (e) { return false; } })());
   check("未触发任务但日志给出提示", r.ql.triggered.length === 0 && r.logs.some(l => l.indexOf("未找到命令包含") >= 0));
+  check("未命中时打印任务清单样本便于排查", r.logs.some(l => l.indexOf("青龙任务清单样本") >= 0));
   check("仍发送成功通知", r.notifs.some(n => n.title === "起点Cookie推送青龙成功"));
 
   // ===== 场景9：青龙 401 → token 失效清缓存（模拟） =====
@@ -517,6 +520,47 @@ function check(desc, cond) {
     check("连续失败触发熔断（放弃剩余开关）", joined21.indexOf("熔断放弃剩余") >= 0);
     check("熔断日志说明不影响已推送与触发", joined21.indexOf("不影响已推送的 Cookie 与签到触发") >= 0);
     check("脚本正常收尾（$done）", r21.doneCalled === true);
+  }
+
+  // ===== 场景22：定时任务状态判定（青龙 CrontabStatus 枚举：0=运行中 1=已启用空闲 2=已禁用 3=排队） =====
+  console.log("\n===== 场景22：任务状态判定（新版枚举） =====");
+  {
+    const r22 = await runScenario("cron-status", {
+      argument: ARG,
+      request: { headers: { Cookie: makeCookie("26026") } },
+      ql: {
+        envs: [{ id: 98, name: "QDREADER_COOKIE", value: "{}", status: 0, remarks: "" }],
+        crons: [
+          { id: 11, command: "task bobbyleu_dailycheckin/qdreader.js", name: "起点读书签到", status: 1, schedule: "5 8 * * *" },
+          { id: 12, command: "task bobbyleu_dailycheckin/qdreader.js", name: "起点读书签到(已禁用)", status: 2, schedule: "0 4 * * *" },
+          { id: 13, command: "task other/qdreader.js", name: "另一个起点任务(运行中)", status: 0, schedule: "0 6 * * *" }
+        ]
+      },
+      wait: 12000
+    });
+    check("status=1 已启用(空闲)任务被触发", r22.ql.triggered.indexOf(11) >= 0);
+    check("status=2 已禁用任务被跳过", r22.ql.triggered.indexOf(12) < 0);
+    check("status=0 运行中任务也算已启用", r22.ql.triggered.indexOf(13) >= 0);
+    check("日志列出命中任务与状态文案", r22.logs.some(l => l.indexOf("命令含「qdreader」的任务") >= 0 && l.indexOf("已启用(空闲)") >= 0));
+    check("日志标注已禁用被跳过", r22.logs.some(l => l.indexOf("跳过：已禁用") >= 0));
+    check("触发结果文案含任务名", r22.logs.some(l => l.indexOf("已触发 2 个签到任务") >= 0));
+  }
+  {
+    // 旧版青龙无 status 枚举，只有 isDisabled 字段 → 回退兼容
+    const r22b = await runScenario("cron-legacy", {
+      argument: ARG,
+      request: { headers: { Cookie: makeCookie("27027") } },
+      ql: {
+        envs: [{ id: 99, name: "QDREADER_COOKIE", value: "{}", status: 0, remarks: "" }],
+        crons: [
+          { id: 21, command: "task qdreader.js", name: "旧版已启用", isDisabled: 0 },
+          { id: 22, command: "task qdreader.js", name: "旧版已禁用", isDisabled: 1 }
+        ]
+      },
+      wait: 12000
+    });
+    check("旧版 isDisabled=0 被触发", r22b.ql.triggered.indexOf(21) >= 0);
+    check("旧版 isDisabled=1 被跳过", r22b.ql.triggered.indexOf(22) < 0);
   }
 
   console.log("\n========================================");
