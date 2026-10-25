@@ -28,7 +28,7 @@ var WHITELIST_MODE = false;                   // true=仅白名单内 uid 写入
 var UID_WHITELIST = [];                       // 白名单 uid，如 ["123456","789012"]
 var PUSH_GAP = 30 * 1000;                     // 同一 uid 两次推送尝试的最小间隔(防高频)：突发多次捕获只推一次，也防失败高频重试
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
-var VERSION = "V1.05";
+var VERSION = "V1.06";
 var QL_ENV_NAME = "QDREADER_COOKIE";          // 青龙 Cookie 环境变量名（固定值）
 var QL_TASK_KEY = "qdreader";                 // 青龙签到任务匹配关键词（固定值：任务命令含 qdreader 即命中，如 task qdreader.js）
 var UID_SPLIT_INDEX = 11;                     // base64(QDHeader).split('|') 中 uid 的下标（与主脚本一致）
@@ -491,7 +491,7 @@ function getToken(label, cb) {
 function getEnvs(label, t, cb) {
   qlReq("GET", "/open/envs?searchValue=" + encodeURIComponent(QL_ENV_NAME) + "&t=" + Date.now(), null, t, function (e, d) {
     if (e) return cb(e);
-    cb(null, d && d.length ? d : []);
+    cb(null, toList(d));   // 同样兼容纯数组与 {data:[...]} 两种返回
   }, 1, label || "查环境");
 }
 
@@ -600,6 +600,17 @@ function pushCookie(uid, cookie, cb) {
 // status=0 是「正在运行中」，只有 status=2 才是已禁用。
 // 旧版青龙没有该枚举、改用 isDisabled: 0/1 字段（1=禁用），无 status 时按它回退。
 // 注意：环境变量(envs)的 status 仍是 0=启用/1=禁用，与定时任务不同，不要混用。
+// 青龙各接口的返回结构并不统一，统一解包成数组：
+//   GET /open/envs  → 纯数组 [ {...}, ... ]
+//   GET /open/crons → 分页对象 { data: [ {...}, ... ], total: N }   （源码 back/services/cron.ts 返回 Promise<{data:Crontab[];total:number}>)
+// 旧版本可能是纯数组，两种都要兼容，否则会把有任务的响应误判成空列表。
+function toList(d) {
+  if (Array.isArray(d)) return d;
+  if (d && Array.isArray(d.data)) return d.data;
+  if (d && d.data && Array.isArray(d.data.data)) return d.data.data;
+  return [];
+}
+
 function isCronDisabled(c) {
   if (!c) return false;
   if (c.status !== undefined && c.status !== null) {
@@ -624,7 +635,12 @@ function cronStatusText(c) {
 function triggerTask(t, cb) {
   qlReq("GET", "/open/crons?t=" + Date.now(), null, t, function (e, d) {
     if (e) return cb(false, "查询任务失败: " + e);
-    var list = Array.isArray(d) ? d : [];
+    var list = toList(d);   // 兼容 {data:[...],total:N} 与纯数组两种返回
+    if (!list.length) {
+      var raw = "";
+      try { raw = JSON.stringify(d); } catch (e9) { raw = String(d); }
+      log("- 查任务：接口未返回任务列表（原始响应前 200 字符）：" + clip(raw, 200));
+    }
     var ids = [];
     var names = [];
     var hits = [];

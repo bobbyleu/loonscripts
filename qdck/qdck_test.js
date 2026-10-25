@@ -79,7 +79,8 @@ function makeQL(initial) {
       });
       return { code: 200, data: null };
     },
-    "GET /open/crons": () => ({ code: 200, data: state.crons }),
+    // 真实青龙返回分页对象 { data:[...], total:N }（back/services/cron.ts），与 /open/envs 的纯数组不同
+    "GET /open/crons": () => ({ code: 200, data: { data: state.crons, total: state.crons.length } }),
     "PUT /open/crons/run": (q, body) => {
       state.triggered.push(...(Array.isArray(body) ? body : [body]));
       return { code: 200, data: null };
@@ -561,6 +562,39 @@ function check(desc, cond) {
     });
     check("旧版 isDisabled=0 被触发", r22b.ql.triggered.indexOf(21) >= 0);
     check("旧版 isDisabled=1 被跳过", r22b.ql.triggered.indexOf(22) < 0);
+  }
+
+  // ===== 场景23：/open/crons 返回结构兼容（新版分页对象 / 旧版纯数组 / 空列表诊断）=====
+  console.log("\n===== 场景23：任务接口返回结构兼容 =====");
+  {
+    // 旧版：纯数组返回（与 /open/envs 一致）
+    const q23 = makeQL({
+      envs: [{ id: 120, name: "QDREADER_COOKIE", value: "{}", status: 0, remarks: "" }],
+      crons: [{ id: 31, command: "task bobbyleu_dailycheckin/qdreader.js", name: "起点读书签到", status: 1, schedule: "5 8 * * *" }]
+    });
+    q23.routes["GET /open/crons"] = () => ({ code: 200, data: q23.state.crons }); // 覆盖成纯数组
+    const r23 = await runScenario("cron-legacy-shape", {
+      argument: ARG,
+      request: { headers: { Cookie: makeCookie("28028") } },
+      qlState: q23.state, qlRoutes: q23.routes,
+      wait: 12000
+    });
+    check("旧版纯数组返回也能触发", JSON.stringify(r23.ql.triggered) === "[31]");
+  }
+  {
+    // 空任务列表 → 打印原始响应诊断，便于以后接口再变时定位
+    const q23b = makeQL({
+      envs: [{ id: 121, name: "QDREADER_COOKIE", value: "{}", status: 0, remarks: "" }],
+      crons: []
+    });
+    const r23c = await runScenario("cron-empty", {
+      argument: ARG,
+      request: { headers: { Cookie: makeCookie("29029") } },
+      qlState: q23b.state, qlRoutes: q23b.routes,
+      wait: 12000
+    });
+    check("空任务列表时打印原始响应诊断", r23c.logs.some(l => l.indexOf("接口未返回任务列表") >= 0));
+    check("空任务列表不触发且不误报成功", r23c.ql.triggered.length === 0 && r23c.logs.some(l => l.indexOf("未找到命令包含") >= 0));
   }
 
   console.log("\n========================================");
