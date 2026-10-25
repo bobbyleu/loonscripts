@@ -10,9 +10,11 @@ CLIENT_ID=input,"",tag=青龙面板CLIENT_ID
 CLIENT_SECRET=input,"",tag=青龙面板CLIENT_SECRET
 QL_URL=input,"",tag=青龙面板地址
 PUSH=switch,"true","false",tag=推送CK至青龙面板
+CF_ACCESS_ID=input,"",tag=CloudflareAccess客户端ID
+CF_ACCESS_SECRET=input,"",tag=CloudflareAccess客户端密钥
 
 [Script]
-http-request ^https?:\/\/api\.m\.jd\.com\/client\.action\?$ script-path=https://raw.githubusercontent.com/bobbyleu/loonscripts/main/jdck/jdck_ql.js,tag=京东CK自动推送青龙面板,requires-body=false,timeout=60,enable=true,argument=[{CLIENT_ID},{CLIENT_SECRET},{PUSH},{QL_URL}]
+http-request ^https?:\/\/api\.m\.jd\.com\/client\.action\?$ script-path=https://raw.githubusercontent.com/bobbyleu/loonscripts/main/jdck/jdck_ql.js,tag=京东CK自动推送青龙面板,requires-body=false,timeout=60,enable=true,argument=[{CLIENT_ID},{CLIENT_SECRET},{PUSH},{QL_URL},{CF_ACCESS_ID},{CF_ACCESS_SECRET}]
 
 [Mitm]
 hostname = %APPEND% api.m.jd.com

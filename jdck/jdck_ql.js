@@ -33,7 +33,7 @@ function parseArgs() {
   function absorb(o) {
     if (!o || typeof o !== "object") return;
     if (Array.isArray(o)) {
-      var names = ["CLIENT_ID", "CLIENT_SECRET", "PUSH", "QL_URL"];
+      var names = ["CLIENT_ID", "CLIENT_SECRET", "PUSH", "QL_URL", "CF_ACCESS_ID", "CF_ACCESS_SECRET"];
       o.forEach(function (v, idx) {
         if (names[idx] && v !== undefined && v !== null) map[names[idx]] = String(v).trim();
       });
@@ -69,7 +69,7 @@ function parseArgs() {
         });
       } else if (s) {
         // 逗号占位式 id,secret,true,false
-        var names2 = ["CLIENT_ID", "CLIENT_SECRET", "PUSH", "QL_URL"];
+        var names2 = ["CLIENT_ID", "CLIENT_SECRET", "PUSH", "QL_URL", "CF_ACCESS_ID", "CF_ACCESS_SECRET"];
         s.split(",").forEach(function (v, idx) {
           v = v.trim();
           if (/^\{.*\}$/.test(v)) return; // 未替换的占位符，跳过
@@ -114,6 +114,17 @@ var _argUrl = getArg("QL_URL", "");
 QL_URL = _argUrl ? _argUrl : (sGet("JDCK_URL") || QL_URL);
 if (_argUrl) sSet("JDCK_URL", _argUrl);
 
+// Cloudflare Access 服务令牌（Service Auth）：给所有青龙请求加 CF-Access-* 头，
+// 即便隧道域名泄露，无令牌请求在 Cloudflare 边缘即被拒。通过插件参数 CF_ACCESS_ID / CF_ACCESS_SECRET 输入。
+var _argAccessId = getArg("CF_ACCESS_ID", "");
+var _argAccessSec = getArg("CF_ACCESS_SECRET", "");
+var _aidFromArg = !!(_argAccessId && !/^\{.*\}$/.test(_argAccessId));
+var _asecFromArg = !!(_argAccessSec && !/^\{.*\}$/.test(_argAccessSec));
+var QL_ACCESS_ID = _aidFromArg ? _argAccessId : sGet("JDCK_CFID");
+var QL_ACCESS_SECRET = _asecFromArg ? _argAccessSec : sGet("JDCK_CFSEC");
+if (_aidFromArg) sSet("JDCK_CFID", _argAccessId);
+if (_asecFromArg) sSet("JDCK_CFSEC", _argAccessSec);
+
 var ENABLE_PUSH = parseBool(getArg("PUSH", "true"), true);
 
 // ========== 持久化键 ==========
@@ -131,6 +142,14 @@ var K_NOTIFY_OK_KEY = "JDCK_NOTIFYOKKEY_"; // 上次「推送成功」通知的 
 var K_FAIL_NOTIFY = "JDCK_FAILNOTIFY"; // 上次「推送失败」通知时间
 var K_BEAT = "JDCK_BEAT";             // 上次「pt_key未变」心跳通知时间
 var K_TRYKEY = "JDCK_TRYKEY_";         // 上次尝试推送的 key（前缀，拼接 pt_pin）
+var K_CAP = "JDCK_CAP_";               // 最新捕获的 pt_key（每次捕获都写，供单飞锁补推最新值）
+function getCap(pin) { return sGet(K_CAP + pin); }
+function setCap(pin, key) { sSet(K_CAP + pin, key); }
+var K_BUSY = "JDCK_BUSY_";             // 单飞锁：推送进行中标记(存开始时间戳)，避免同 pin 并发重复推送
+function getBusy(pin) { return Number(sGet(K_BUSY + pin) || "0"); }
+function setBusy(pin) { sSet(K_BUSY + pin, String(Date.now())); }
+function clearBusy(pin) { sSet(K_BUSY + pin, "0"); }
+var BUSY_TTL = 55 * 1000;             // 单飞锁有效期(ms)，略小于脚本超时(60s)，超时自动失效防死锁
 
 // ========== 工具 ==========
 function clip(s, n) { s = (s === undefined || s === null) ? "" : String(s); return s.length > n ? s.slice(0, n) + "…" : s; }
@@ -158,7 +177,7 @@ function classifyQLFailure(status, rawData) {
 
 // ========== 青龙请求 ==========
 // 网络错误（超时/断连）自动重试，解决“青龙其实已更新、但响应超时导致误报失败”的歧义。
-var QL_HTTP_TIMEOUT = 10000; // 单次 httpClient 超时（毫秒；Loon 单位为 ms）。此前误写为 10(=10ms) 几乎必超时，此为根因
+var QL_HTTP_TIMEOUT = 15000; // 单次 httpClient 超时（毫秒）。此前 10s 在直连 Cloudflare 边缘抖动时易超时，放宽到 15s 吸收抖动
 var QL_MAX_RETRY = 3;        // 网络错误最多尝试次数（含首次）。给瞬断/隧道抖动留余地：最多 3 次、2 次延迟重试
 var QL_RETRY_DELAY = 2000;   // 网络错误重试前的等待(毫秒)。立即连重试常撞上同一瞬断，等待 2s 让连接恢复再试
 var QL_HTTP_NODE = "DIRECT"; // 出站节点：DIRECT=直连(不经 Loon 代理)。青龙为公网域名时直连最快最稳；若你的网络必须走某节点才能访问，改成该节点名
@@ -167,6 +186,9 @@ function qlReq(method, path, body, token, cb, _attempt, _label) {
   var _lab = _label ? ("[" + _label + "] ") : "";
   var h = { "Content-Type": "application/json", "Accept": "application/json" };
   if (token) h["Authorization"] = "Bearer " + token;
+  // Cloudflare Access 服务令牌：所有青龙请求统一带上，隧道域名即便泄露也无令牌即被边缘拒绝
+  if (QL_ACCESS_ID) h["CF-Access-Client-Id"] = QL_ACCESS_ID;
+  if (QL_ACCESS_SECRET) h["CF-Access-Client-Secret"] = QL_ACCESS_SECRET;
   var opt = { url: QL_URL + path, headers: h, timeout: QL_HTTP_TIMEOUT, node: QL_HTTP_NODE };
   if (body !== undefined && body !== null) {
     var bodyStr = JSON.stringify(body);
@@ -323,6 +345,33 @@ function pushCK(pin, key, cb) {
   });
 }
 
+// 单飞锁 + 最新值优先：同一 pin 同一时刻只由一个实例真正推送；
+// 并发期间新捕获到的(可能更新的) key 通过 setCap 记录，推送完成后若发现 cap 又变化则继续补推最新值，
+// 最多 5 轮，确保最终写进青龙的是“最后看到的 key”，既不会因去重丢新 key，也不会被旧 key 反序覆盖。
+function pushLatest(pin, cb) {
+  var _busy = getBusy(pin);
+  if (_busy && Date.now() - _busy < BUSY_TTL) {
+    // 已有同 pin 实例在推送，本次只更新最新 key（已在 run 顶部 setCap），交由持锁实例补推
+    return cb(false, "并发突发：已由其他实例推送最新值", true, null);
+  }
+  setBusy(pin);
+  var rounds = 0;
+  var lastOkKey = null;
+  function step() {
+    rounds++;
+    var target = getCap(pin);
+    if (!target) { clearBusy(pin); return cb(false, "无待推送 key", false, null); }
+    pushCK(pin, target, function (ok, msg) {
+      if (ok) { setLastKey(pin, target); lastOkKey = target; }
+      var newest = getCap(pin);
+      if (newest && newest !== target && rounds < 5) { step(); return; }
+      clearBusy(pin);
+      cb(ok, msg, false, lastOkKey);
+    });
+  }
+  step();
+}
+
 // 获取到 pt_key 后：检测到就通知（不再做通知频率控制）
 function maybeNotifyGet(pin, key) {
   notify("获取ck成功", "pt_pin: " + pin, "pt_key: " + key);
@@ -340,6 +389,9 @@ function run() {
 
   var ptKey = mk[1];
   var ptPin = dPin(mp[1]);
+
+  // 每次捕获都记录“最新看到的 pt_key”，供单飞锁在并发期间补推最新值（确保最终落地的是最新 key，不会被旧 key 反序覆盖）
+  setCap(ptPin, ptKey);
 
   // 比对 pt_key 的值：仅用于日志展示「是否发生变化」，不再据此跳过推送（开启「推送青龙」即强制推送）
   var _stored = getLastKey(ptPin);
@@ -407,17 +459,19 @@ function run() {
   }
 
   log("2、推送CK至青龙面板。");
-  log("- 开始推送（目标=" + hostOf(QL_URL) + " | 出站=" + QL_HTTP_NODE + "）");
-  pushCK(ptPin, ptKey, function (ok2, msg) {
+  log("- 开始推送（目标=" + hostOf(QL_URL) + " | 出站=" + QL_HTTP_NODE + (QL_ACCESS_ID ? " | CloudflareAccess=开" : " | CloudflareAccess=关") + "）");
+  pushLatest(ptPin, function (ok2, msg, skip, pushedKey) {
+    if (skip) { log("- 并发突发：已由其他实例推送最新值，本次跳过。"); log(""); finish(); return; }
     if (ok2) {
-      setLastKey(ptPin, ptKey);
+      var _pk = pushedKey || ptKey;   // 实际落地到青龙的 key（并发补推时可能是比本次捕获更新的 key）
+      setLastKey(ptPin, _pk);
       log("- 推送结果：成功（" + msg + "）");
       log("- 已发送「ck推送青龙成功」通知。");
-      notify("ck推送青龙成功", "pt_pin: " + ptPin, msg + " | pt_key: " + ptKey);
+      notify("ck推送青龙成功", "pt_pin: " + ptPin, msg + " | pt_key: " + _pk);
       // 二次复核：重新拉取青龙确认最新 pt_key 已落地，消除“日志失败但青龙已更新”的歧义
       getToken("复核取token", function (e, tok) {
         if (e) { log("- 二次复核：取 token 失败（" + e + "），无法确认；以青龙侧实际为准。"); log(""); return finish(); }
-        verifyCK(tok, ptPin, ptKey, function (vf, vm) {
+        verifyCK(tok, ptPin, _pk, function (vf, vm) {
           log("- 二次复核：" + (vf ? "✅ " + vm : "⚠️ " + vm));
           log("");
           finish();
