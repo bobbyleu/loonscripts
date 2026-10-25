@@ -28,7 +28,7 @@ var WHITELIST_MODE = false;                   // true=仅白名单内 uid 写入
 var UID_WHITELIST = [];                       // 白名单 uid，如 ["123456","789012"]
 var PUSH_GAP = 30 * 1000;                     // 同一 uid 两次推送尝试的最小间隔(防高频)：突发多次捕获只推一次，也防失败高频重试
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
-var VERSION = "V1.08";
+var VERSION = "V1.09";
 var QL_ENV_NAME = "QDREADER_COOKIE";          // 青龙 Cookie 环境变量名（固定值）
 var QL_TASK_KEY = "qdreader";                 // 青龙签到任务匹配关键词（固定值：任务命令含 qdreader 即命中，如 task qdreader.js）
 var UID_SPLIT_INDEX = 11;                     // base64(QDHeader).split('|') 中 uid 的下标（与主脚本一致）
@@ -407,7 +407,9 @@ var QL_DEADLINE_MS = 120000; // 脚本总时间预算(ms)，默认 2 分钟。
                              // 效果等于把 Loon 的全部 60s 预算都用于发请求（尤其是 PUT /open/crons/run），
                              // 避免此前 45s 预算在慢网下被烧光、导致 run 没发出去。
                              // 代价：极端慢网时脚本会被 Loon 静默杀掉而非打印「时间预算耗尽」。
-var QL_HTTP_NODE = "DIRECT"; // 出站节点：DIRECT=直连(不经 Loon 代理)。青龙为公网域名时直连最快最稳；若你的网络必须走某节点才能访问，改成该节点名
+var QL_HTTP_NODE = ""; // 出站节点：留空 = 走 Loon 正常代理路由（按你的代理规则/策略选路，即「通过 Loon 代理访问」）；
+                       // 填 "DIRECT" 则强制直连(不经 Loon 代理)；也可填具体节点名强制走该节点。
+                       // 默认空：青龙 xigl.qzz.io 改经 Loon 代理访问，避免脚本强制直连 Cloudflare 边缘抖动。
 var T0 = Date.now();         // 脚本起始时刻（全局时间预算基准）
 var _deadlineHit = false;
 function outOfTime() { return (Date.now() - T0) > QL_DEADLINE_MS; }
@@ -428,7 +430,8 @@ function qlReq(method, path, body, token, cb, _attempt, _label) {
   // Cloudflare Access 服务令牌：所有青龙请求统一带上，隧道域名即便泄露也无令牌即被边缘拒绝
   if (QL_ACCESS_ID) h["CF-Access-Client-Id"] = QL_ACCESS_ID;
   if (QL_ACCESS_SECRET) h["CF-Access-Client-Secret"] = QL_ACCESS_SECRET;
-  var opt = { url: QL_URL + path, headers: h, timeout: QL_HTTP_TIMEOUT, node: QL_HTTP_NODE };
+  var opt = { url: QL_URL + path, headers: h, timeout: QL_HTTP_TIMEOUT };
+  if (QL_HTTP_NODE) opt.node = QL_HTTP_NODE; // 留空则走 Loon 默认代理路由（不强制 DIRECT）
   if (body !== undefined && body !== null) {
     var bodyStr = JSON.stringify(body);
     if (bodyStr) opt.body = bodyStr;
@@ -968,7 +971,7 @@ function run() {
   }
 
   log("2、推送Cookie至青龙面板。");
-  log("- 目标=" + hostOf(QL_URL) + " | 变量=" + QL_ENV_NAME + " | 触发签到=" + (ENABLE_RUN_SIGN ? "开" : "关") + " | 出站=" + QL_HTTP_NODE + (QL_ACCESS_ID ? " | CloudflareAccess=开" : " | CloudflareAccess=关"));
+  log("- 目标=" + hostOf(QL_URL) + " | 变量=" + QL_ENV_NAME + " | 触发签到=" + (ENABLE_RUN_SIGN ? "开" : "关") + " | 出站=" + (QL_HTTP_NODE || "Loon代理(默认路由)") + (QL_ACCESS_ID ? " | CloudflareAccess=开" : " | CloudflareAccess=关"));
   // 主目标优先：先推 Cookie + 触发签到；任务开关同步排在最后（onPushed → finishWithSwitchSync），
   // 网络差时最多放弃同步，也不会拖累 Cookie 推送与签到触发（Loon 脚本约 60s 硬上限）
   decidePush(uid, cookie);
