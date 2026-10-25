@@ -150,6 +150,7 @@ function getBusy(pin) { return Number(sGet(K_BUSY + pin) || "0"); }
 function setBusy(pin) { sSet(K_BUSY + pin, String(Date.now())); }
 function clearBusy(pin) { sSet(K_BUSY + pin, "0"); }
 var BUSY_TTL = 55 * 1000;             // 单飞锁有效期(ms)，略小于脚本超时(60s)，超时自动失效防死锁
+var DEBOUNCE_MS = 4000;                // 未变化捕获的缓冲窗口(ms)：京东App打开稳定触发多次捕获，等待后续是否出现更新 key，避免把刷新前的旧 key 推上去
 
 // ========== 工具 ==========
 function clip(s, n) { s = (s === undefined || s === null) ? "" : String(s); return s.length > n ? s.slice(0, n) + "…" : s; }
@@ -377,6 +378,70 @@ function maybeNotifyGet(pin, key) {
   notify("获取ck成功", "pt_pin: " + pin, "pt_key: " + key);
 }
 
+// 推送结果回调：成功/失败的统一处理（含二次复核、失败限频通知）
+function onPushed(pin, ptKey, ok2, msg, skip, pushedKey) {
+  if (skip) { log("- 并发突发：已由其他实例推送最新值，本次跳过。"); log(""); finish(); return; }
+  if (ok2) {
+    var _pk = pushedKey || ptKey;   // 实际落地到青龙的 key（并发补推时可能是比本次捕获更新的 key）
+    setLastKey(pin, _pk);
+    log("- 推送结果：成功（" + msg + "）");
+    log("- 已发送「ck推送青龙成功」通知。");
+    notify("ck推送青龙成功", "pt_pin: " + pin, msg + " | pt_key: " + _pk);
+    // 二次复核：重新拉取青龙确认最新 pt_key 已落地，消除“日志失败但青龙已更新”的歧义
+    getToken("复核取token", function (e, tok) {
+      if (e) { log("- 二次复核：取 token 失败（" + e + "），无法确认；以青龙侧实际为准。"); log(""); return finish(); }
+      verifyCK(tok, pin, _pk, function (vf, vm) {
+        log("- 二次复核：" + (vf ? "✅ " + vm : "⚠️ " + vm));
+        log("");
+        finish();
+      });
+    });
+  } else {
+    var _isCF = /\[CF_TUNNEL\]/.test(msg);
+    log("- 推送结果：失败（" + msg + "）");
+    if (_isCF) {
+      log("- 分类：青龙隧道/网关故障（与脚本无关）。CK 未送达青龙；隧道恢复后脚本会自动重试，无需改脚本。");
+    } else {
+      log("- 提示：网络超时可能是“请求已到达青龙并处理、响应未返回”，青龙侧可能已更新；本账号下次触发会自动重试。");
+    }
+    // 「推送失败」通知限频(10min)，持续失败时也不会刷屏
+    var lastFail = Number(sGet(K_FAIL_NOTIFY) || "0");
+    if (Date.now() - lastFail >= NOTIFY_FAIL_GAP) {
+      sSet(K_FAIL_NOTIFY, String(Date.now()));
+      log("- 已发送「ck推送青龙失败」通知(限频10min)。");
+      notify("ck推送青龙失败", "pt_pin: " + pin, _isCF ? "青龙隧道不可达(与脚本无关)" : msg);
+    }
+    log("");
+    finish();
+  }
+}
+
+// 推送决策：京东 App 打开会稳定触发多次捕获。若为「新 key」立即推送；
+// 若为「未变化」（可能是刷新前的旧 key 或稳态同值），进入缓冲窗口，等待后续捕获，
+// 仅当窗口内出现更新的 key（cap != lastKey）才补推，避免把旧 key 推上去、也避免重复推送。
+function decidePush(pin, ptKey) {
+  var cap = getCap(pin);
+  if (!cap) { finish(); return; }
+  var changed = (cap !== getLastKey(pin));
+  if (changed) {
+    log("- 检测到新 key，立即推送（单飞锁+最新值优先兜底）。");
+    pushLatest(pin, function (ok2, msg, skip, pk) { onPushed(pin, ptKey, ok2, msg, skip, pk); });
+  } else {
+    log("- 与上次推送相同，进入 " + (DEBOUNCE_MS / 1000) + "s 缓冲：等待后续捕获，避免推送刷新前的旧 key。");
+    setTimeout(function () {
+      var cap2 = getCap(pin);
+      if (cap2 && cap2 !== getLastKey(pin)) {
+        log("- 缓冲期内捕获到新 key，补推最新值。");
+        pushLatest(pin, function (ok2, msg, skip, pk) { onPushed(pin, ptKey, ok2, msg, skip, pk); });
+      } else {
+        log("- 缓冲期无新 key，无需推送（青龙已为该值，避免冗余）。");
+        log("");
+        finish();
+      }
+    }, DEBOUNCE_MS);
+  }
+}
+
 function run() {
   var req = (typeof $request !== "undefined" && $request) ? $request : {};
 
@@ -460,42 +525,8 @@ function run() {
 
   log("2、推送CK至青龙面板。");
   log("- 开始推送（目标=" + hostOf(QL_URL) + " | 出站=" + QL_HTTP_NODE + (QL_ACCESS_ID ? " | CloudflareAccess=开" : " | CloudflareAccess=关") + "）");
-  pushLatest(ptPin, function (ok2, msg, skip, pushedKey) {
-    if (skip) { log("- 并发突发：已由其他实例推送最新值，本次跳过。"); log(""); finish(); return; }
-    if (ok2) {
-      var _pk = pushedKey || ptKey;   // 实际落地到青龙的 key（并发补推时可能是比本次捕获更新的 key）
-      setLastKey(ptPin, _pk);
-      log("- 推送结果：成功（" + msg + "）");
-      log("- 已发送「ck推送青龙成功」通知。");
-      notify("ck推送青龙成功", "pt_pin: " + ptPin, msg + " | pt_key: " + _pk);
-      // 二次复核：重新拉取青龙确认最新 pt_key 已落地，消除“日志失败但青龙已更新”的歧义
-      getToken("复核取token", function (e, tok) {
-        if (e) { log("- 二次复核：取 token 失败（" + e + "），无法确认；以青龙侧实际为准。"); log(""); return finish(); }
-        verifyCK(tok, ptPin, _pk, function (vf, vm) {
-          log("- 二次复核：" + (vf ? "✅ " + vm : "⚠️ " + vm));
-          log("");
-          finish();
-        });
-      });
-    } else {
-      var _isCF = /\[CF_TUNNEL\]/.test(msg);
-      log("- 推送结果：失败（" + msg + "）");
-      if (_isCF) {
-        log("- 分类：青龙隧道/网关故障（与脚本无关）。CK 未送达青龙；隧道恢复后脚本会自动重试，无需改脚本。");
-      } else {
-        log("- 提示：网络超时可能是“请求已到达青龙并处理、响应未返回”，青龙侧可能已更新；本账号下次触发会自动重试。");
-      }
-      // 「推送失败」通知限频(10min)，持续失败时也不会刷屏
-      var lastFail = Number(sGet(K_FAIL_NOTIFY) || "0");
-      if (Date.now() - lastFail >= NOTIFY_FAIL_GAP) {
-        sSet(K_FAIL_NOTIFY, String(Date.now()));
-        log("- 已发送「ck推送青龙失败」通知(限频10min)。");
-        notify("ck推送青龙失败", "pt_pin: " + ptPin, _isCF ? "青龙隧道不可达(与脚本无关)" : msg);
-      }
-      log("");
-      finish();
-    }
-  });
+  decidePush(ptPin, ptKey);
+  return;
 }
 
 try { run(); } catch (e) {
