@@ -197,7 +197,7 @@ function check(desc, cond) {
   check("Cookie 变量已新建", !!ckEnv3);
   check("value 为 JSON 单键值对且含 uid=10001", (() => { try { const m = JSON.parse(ckEnv3.value); return m["10001"] === ck3 && Object.keys(m).length === 1; } catch (e) { return false; } })());
   check("6 个任务开关变量已同步新建", ["QDREADER_ADV_JOB_ENABLE","QDREADER_EXTRA_ADV_JOB_ENABLE","QDREADER_LOTTERY_ENABLE","QDREADER_WEEKLY_EXCHANGE_ENABLE","QDREADER_CHAPTER_CARD_ENABLE","QDREADER_MESSAGE_BOX_ENABLE"].every(n => r.ql.envs.some(e => e.name === n)));
-  check("签到任务已触发（status=1 已启用的 qdreader，status=2 已禁用者被跳过）", JSON.stringify(r.ql.triggered) === "[1]");
+  check("签到任务已触发（status=1 启用与 status=2 已禁用的 qdreader 均触发）", JSON.stringify(r.ql.triggered) === "[1,3]");
   check("发送成功通知", r.notifs.some(n => n.title === "起点Cookie推送青龙成功"));
   check("日志含二次复核✅", r.logs.some(l => l.indexOf("二次复核：✅") >= 0));
 
@@ -217,7 +217,7 @@ function check(desc, cond) {
   check("新账号 30003 已写入", m4 && m4["30003"] === ck4new);
   check("变量只有一对键值", m4 && Object.keys(m4).length === 1);
   check("日志含覆盖告警（说明被替换的旧账号）", r.logs.some(l => l.indexOf("按覆盖语义替换") >= 0 && l.indexOf("20002") >= 0));
-  check("未误触发其他任务", JSON.stringify(r.ql.triggered) === "[1]");
+  check("未误触发其他任务", JSON.stringify(r.ql.triggered) === "[1,3]");
 
   // ===== 场景5：同 uid 更新（覆盖为单账号，其他账号被替换） =====
   console.log("\n===== 场景5：同 uid 更新（覆盖为单账号） =====");
@@ -396,7 +396,7 @@ function check(desc, cond) {
         return Object.keys(m).length === 1 && !!m["17118"];
       } catch (e) { return false; }
     })());
-    check("签到任务只触发一次（突发收敛为一次运行）", JSON.stringify(sharedQL.state.triggered) === "[1]");
+    check("签到任务只触发一次（突发收敛为一次运行，含已禁用任务）", JSON.stringify(sharedQL.state.triggered) === "[1,3]");
   }
 
   // ===== 场景17：开关节流（5min 内第二次触发不重复同步） =====
@@ -445,7 +445,7 @@ function check(desc, cond) {
     const m18c = (() => { try { return JSON.parse(sharedQL3.state.envs.find(e => e.id === 90).value); } catch (e) { return null; } })();
     check("A 换新cookie再推送，变量只含新的 21021（B 被覆盖移除）", m18c && Object.keys(m18c).length === 1 && m18c["21021"] === ckA2);
     check("第三次推送日志含覆盖告警（22022 被替换）", r18c.logs.some(l => l.indexOf("按覆盖语义替换") >= 0 && l.indexOf("22022") >= 0));
-    check("三次推送各触发一次签到（按需触发，不合并）", sharedQL3.state.triggered.length === 3);
+    check("三次推送共触发 6 次（每轮含 2 个 qdreader 任务，含已禁用）", sharedQL3.state.triggered.length === 6);
   }
 
   // ===== 场景19：相同cookie超过30s → 强制推送路径（V1.02 曾误入「无待推送账号」失败分支） =====
@@ -471,7 +471,7 @@ function check(desc, cond) {
     check("变量仍为该账号单键值", (() => { try { const m = JSON.parse(r19.ql.envs.find(e => e.id === 95).value); return m["23023"] === ck19 && Object.keys(m).length === 1; } catch (e) { return false; } })());
     check("同值不重复通知（无成功通知）", !r19.notifs.some(n => n.title === "起点Cookie推送青龙成功"));
     check("无失败通知", !r19.notifs.some(n => n.title === "起点Cookie推送青龙失败"));
-    check("签到任务已触发", JSON.stringify(r19.ql.triggered) === "[1]");
+    check("签到任务已触发（含已禁用任务）", JSON.stringify(r19.ql.triggered) === "[1,3]");
   }
 
   // ===== 场景20：合并查询（V1.04）— 开关同步只发 1 次全量 GET，已是最新值零写入 =====
@@ -496,7 +496,7 @@ function check(desc, cond) {
     check("合并查询：GET /open/envs 共 3 次（推送+复核+同步各1，旧版为8）", r20.ql.envGets === 3);
     check("同步小结日志存在", r20.logs.some(l => l.indexOf("开关同步小结") >= 0));
     check("Cookie 仍正常推送（主目标不受影响）", (() => { try { const m = JSON.parse(r20.ql.envs.find(e => e.id === 96).value); return m["24024"] === ck20; } catch (e) { return false; } })());
-    check("签到任务已触发", JSON.stringify(r20.ql.triggered) === "[1]");
+    check("签到任务已触发（含已禁用任务）", JSON.stringify(r20.ql.triggered) === "[1,3]");
   }
 
   // ===== 场景21：主目标优先（V1.04）— 开关同步全失败也不影响 Cookie 推送与签到触发 =====
@@ -515,7 +515,7 @@ function check(desc, cond) {
     const iSync = r21.logs.reduce((a, l, i) => (l.indexOf("按插件设置同步至青龙环境变量") >= 0 ? i : a), -1);
     check("主目标优先：触发签到排在开关同步之前", iTrig >= 0 && iSync >= 0 && iTrig < iSync);
     check("Cookie 已推送成功（变量已更新）", (() => { try { const m = JSON.parse(r21.ql.envs.find(e => e.id === 97).value); return m["25025"] === ck21; } catch (e) { return false; } })());
-    check("签到任务已触发", JSON.stringify(r21.ql.triggered) === "[1]");
+    check("签到任务已触发（含已禁用任务）", JSON.stringify(r21.ql.triggered) === "[1,3]");
     check("成功通知已发送", r21.notifs.some(n => n.title === "起点Cookie推送青龙成功"));
     check("无失败通知（主目标成功）", !r21.notifs.some(n => n.title === "起点Cookie推送青龙失败"));
     check("连续失败触发熔断（放弃剩余开关）", joined21.indexOf("熔断放弃剩余") >= 0);
@@ -540,11 +540,11 @@ function check(desc, cond) {
       wait: 12000
     });
     check("status=1 已启用(空闲)任务被触发", r22.ql.triggered.indexOf(11) >= 0);
-    check("status=2 已禁用任务被跳过", r22.ql.triggered.indexOf(12) < 0);
-    check("status=0 运行中任务也算已启用", r22.ql.triggered.indexOf(13) >= 0);
+    check("status=2 已禁用任务仍被触发", r22.ql.triggered.indexOf(12) >= 0);
+    check("status=0 运行中任务也被触发", r22.ql.triggered.indexOf(13) >= 0);
     check("日志列出命中任务与状态文案", r22.logs.some(l => l.indexOf("命令含「qdreader」的任务") >= 0 && l.indexOf("已启用(空闲)") >= 0));
-    check("日志标注已禁用被跳过", r22.logs.some(l => l.indexOf("跳过：已禁用") >= 0));
-    check("触发结果文案含任务名", r22.logs.some(l => l.indexOf("已触发 2 个签到任务") >= 0));
+    check("日志标注已禁用仍强制触发", r22.logs.some(l => l.indexOf("已禁用，仍强制触发") >= 0));
+    check("触发结果文案含任务名", r22.logs.some(l => l.indexOf("已触发 3 个签到任务") >= 0));
   }
   {
     // 旧版青龙无 status 枚举，只有 isDisabled 字段 → 回退兼容
@@ -561,7 +561,7 @@ function check(desc, cond) {
       wait: 12000
     });
     check("旧版 isDisabled=0 被触发", r22b.ql.triggered.indexOf(21) >= 0);
-    check("旧版 isDisabled=1 被跳过", r22b.ql.triggered.indexOf(22) < 0);
+    check("旧版 isDisabled=1 仍被触发", r22b.ql.triggered.indexOf(22) >= 0);
   }
 
   // ===== 场景23：/open/crons 返回结构兼容（新版分页对象 / 旧版纯数组 / 空列表诊断）=====

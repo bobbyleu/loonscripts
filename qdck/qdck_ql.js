@@ -28,7 +28,7 @@ var WHITELIST_MODE = false;                   // true=仅白名单内 uid 写入
 var UID_WHITELIST = [];                       // 白名单 uid，如 ["123456","789012"]
 var PUSH_GAP = 30 * 1000;                     // 同一 uid 两次推送尝试的最小间隔(防高频)：突发多次捕获只推一次，也防失败高频重试
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
-var VERSION = "V1.06";
+var VERSION = "V1.07";
 var QL_ENV_NAME = "QDREADER_COOKIE";          // 青龙 Cookie 环境变量名（固定值）
 var QL_TASK_KEY = "qdreader";                 // 青龙签到任务匹配关键词（固定值：任务命令含 qdreader 即命中，如 task qdreader.js）
 var UID_SPLIT_INDEX = 11;                     // base64(QDHeader).split('|') 中 uid 的下标（与主脚本一致）
@@ -593,11 +593,13 @@ function pushCookie(uid, cookie, cb) {
 
 // ========== 触发青龙签到任务 ==========
 // PUT /open/crons/run，body 是任务 ID 数组（注意是 PUT 不是 POST）。
-// 按 command 包含 TASK_KEY 且 status=0（已启用）定位任务，比按任务名称可靠。
-// 任务「是否已禁用」判定。青龙状态枚举（源码 back/data/cron.ts）：
+// 按 command 包含 TASK_KEY 定位任务，比按任务名称可靠。
+// 不论任务当前状态（含「已禁用」status=2）都触发：手动触发应凌驾于定时调度的开关之上。
+// 青龙 run 接口按 id 直接执行命令，不受 status 影响（status 只控制定时调度），
+// 故「已禁用」的任务也能被本脚本触发，且不会改变其「已禁用」状态。
+// 青龙任务状态枚举（源码 back/data/cron.ts，仅用于日志标注，不再用于跳过）：
 //   CrontabStatus { running=0, idle=1, disabled=2, queued=3 }
-// 即 status=1(idle) 才是「已启用且空闲」（面板上显示「启用」的任务就是它），
-// status=0 是「正在运行中」，只有 status=2 才是已禁用。
+// 即 status=1(idle) 才是「已启用且空闲」（面板显示「启用」的就是它），status=2 是「已禁用」。
 // 旧版青龙没有该枚举、改用 isDisabled: 0/1 字段（1=禁用），无 status 时按它回退。
 // 注意：环境变量(envs)的 status 仍是 0=启用/1=禁用，与定时任务不同，不要混用。
 // 青龙各接口的返回结构并不统一，统一解包成数组：
@@ -648,9 +650,11 @@ function triggerTask(t, cb) {
       var c = list[i];
       var cmd = String((c && c.command) || "");
       if (!cmd || cmd.toLowerCase().indexOf(QL_TASK_KEY.toLowerCase()) < 0) continue;
-      var dis = isCronDisabled(c);
-      hits.push("#" + c.id + " " + (c.name || cmd) + " " + cronStatusText(c) + (dis ? "（跳过：已禁用）" : " ✓"));
-      if (!dis) { ids.push(c.id); names.push(c.name || cmd); }
+      var dis = isCronDisabled(c);   // 仅用于日志标注（本脚不再因「已禁用」跳过）
+      hits.push("#" + c.id + " " + (c.name || cmd) + " " + cronStatusText(c) + (dis ? "（已禁用，仍强制触发）" : " ✓"));
+      // 不论状态（含已禁用）都加入触发：手动触发凌驾于定时调度开关；run 接口不受 status 影响
+      ids.push(c.id);
+      names.push(c.name || cmd);
     }
     if (hits.length) log("- 命令含「" + QL_TASK_KEY + "」的任务：" + hits.join(" | "));
     if (!ids.length) {
@@ -660,7 +664,7 @@ function triggerTask(t, cb) {
         sample.push("#" + list[k].id + " " + String((list[k] && list[k].command) || "") + " " + cronStatusText(list[k]));
       }
       if (sample.length) log("- 青龙任务清单样本（前 " + sample.length + " 条）：" + sample.join(" | "));
-      return cb(false, "未找到命令包含「" + QL_TASK_KEY + "」且已启用的任务（命令需含 " + QL_TASK_KEY + "，且状态不能是「已禁用」）");
+      return cb(false, "未找到命令包含「" + QL_TASK_KEY + "」的任务（命令需含 " + QL_TASK_KEY + "）");
     }
     qlReq("PUT", "/open/crons/run", ids, t, function (e2) {
       if (e2) return cb(false, "触发失败: " + e2);
