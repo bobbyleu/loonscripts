@@ -28,7 +28,7 @@ var WHITELIST_MODE = false;                   // true=仅白名单内 uid 写入
 var UID_WHITELIST = [];                       // 白名单 uid，如 ["123456","789012"]
 var PUSH_GAP = 30 * 1000;                     // 同一 uid 两次推送尝试的最小间隔(防高频)：突发多次捕获只推一次，也防失败高频重试
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
-var VERSION = "V1.07";
+var VERSION = "V1.08";
 var QL_ENV_NAME = "QDREADER_COOKIE";          // 青龙 Cookie 环境变量名（固定值）
 var QL_TASK_KEY = "qdreader";                 // 青龙签到任务匹配关键词（固定值：任务命令含 qdreader 即命中，如 task qdreader.js）
 var UID_SPLIT_INDEX = 11;                     // base64(QDHeader).split('|') 中 uid 的下标（与主脚本一致）
@@ -401,8 +401,12 @@ function computeUid(cmap, respBody) {
 var QL_HTTP_TIMEOUT = 15000; // 单次 httpClient 超时（毫秒）。直连 Cloudflare 边缘抖动时 10s 易超时，放宽到 15s 吸收抖动
 var QL_MAX_RETRY = 3;        // 网络错误最多尝试次数（含首次）
 var QL_RETRY_DELAYS = [2000, 3000, 5000]; // 递增退避：第1次重试等 2s、第2次等 3s、第3次等 5s（抖动恢复期更长，恢复概率更高）
-var QL_DEADLINE_MS = 45000;  // 脚本总时间预算(ms)：Loon 对脚本有 ~60s 硬上限，超时会被直接杀掉且不给通知。
-                             // 到点后主动停止后续青龙请求并收尾，保证「失败也有通知」而不是被静默杀掉。
+var QL_DEADLINE_MS = 120000; // 脚本总时间预算(ms)，默认 2 分钟。
+                             // 注意：Loon 对脚本有 ~60s 硬上限，超时会被直接杀掉且不给通知。
+                             // 本值 > 60s 后，「到点优雅收尾」安全网实际不会触发（Loon 会先在 60s 杀掉脚本），
+                             // 效果等于把 Loon 的全部 60s 预算都用于发请求（尤其是 PUT /open/crons/run），
+                             // 避免此前 45s 预算在慢网下被烧光、导致 run 没发出去。
+                             // 代价：极端慢网时脚本会被 Loon 静默杀掉而非打印「时间预算耗尽」。
 var QL_HTTP_NODE = "DIRECT"; // 出站节点：DIRECT=直连(不经 Loon 代理)。青龙为公网域名时直连最快最稳；若你的网络必须走某节点才能访问，改成该节点名
 var T0 = Date.now();         // 脚本起始时刻（全局时间预算基准）
 var _deadlineHit = false;
