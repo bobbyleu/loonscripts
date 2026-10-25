@@ -1,5 +1,5 @@
 #!name = 起点Cookie推送青龙面板
-#!desc = 获取起点读书Cookie推送到青龙变量，推送后可触发青龙签到任务，并按插件设置同步任务开关至青龙环境变量。当前版本：V1.02
+#!desc = 获取起点读书Cookie覆盖写入青龙变量（只保留最新捕获的一个账号），推送后可触发青龙签到任务，并按插件设置同步任务开关至青龙环境变量。当前版本：V1.03
 #!author = bobbyleu
 #!homepage = https://github.com/bobbyleu/loonscripts
 #!tag = 起点Cookie推送青龙
@@ -18,7 +18,7 @@ LOTTERY=switch,"true","false",tag=每日抽奖, desc=同步至青龙变量 QDREA
 WEEKLY_EXCHANGE=switch,"true","false",tag=每周兑换, desc=同步至青龙变量 QDREADER_WEEKLY_EXCHANGE_ENABLE
 CHAPTER_CARD=switch,"true","false",tag=章节卡片, desc=同步至青龙变量 QDREADER_CHAPTER_CARD_ENABLE
 MESSAGE_BOX=switch,"false","true",tag=大咖荐书, desc=同步至青龙变量 QDREADER_MESSAGE_BOX_ENABLE，默认关闭
-PUSH=switch,"true","false",tag=推送Cookie至青龙面板, desc=开=获取到Cookie即推送；关=仅抓取不推送，也不写青龙
+PUSH=switch,"true","false",tag=推送Cookie至青龙面板, desc=开=获取到Cookie即推送并覆盖青龙变量（只保留最新账号）；关=仅抓取不推送，也不写青龙
 RUN_SIGN=switch,"true","false",tag=推送后触发签到任务, desc=开=推送成功后立即执行青龙签到任务；关=只更新变量
 
 [Script]

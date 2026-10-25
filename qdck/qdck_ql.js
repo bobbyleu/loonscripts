@@ -1,6 +1,7 @@
 // 起点Cookie自动推送青龙面板
 // 拦截 h5.if.qidian.com 上携带登录 Cookie 的 getlogininfo 请求，捕获完整 Cookie，
-// 按 uid 匹配青龙 QDREADER_COOKIE（JSON Map {"uid":"完整cookie"}）并自动更新：同 uid 改写、新 uid 新增、其他账号保留。
+// 按 uid 覆盖写入青龙 QDREADER_COOKIE（JSON 单键值对 {"uid":"完整cookie"}）：
+// 获取到新 Cookie 即整体覆盖，变量永远只保留最新捕获的一个账号（qdreader.js 一次运行覆盖全部账号，单账号即全量）。
 // 推送成功后可按开关触发青龙起点签到任务立即执行（PUT /open/crons/run）。
 //
 // 抓取逻辑与 qdreader.js 主脚本保持一致（已从其源码中提取核实）：
@@ -26,7 +27,7 @@ var WHITELIST_MODE = false;                   // true=仅白名单内 uid 写入
 var UID_WHITELIST = [];                       // 白名单 uid，如 ["123456","789012"]
 var PUSH_GAP = 30 * 1000;                     // 同一 uid 两次推送尝试的最小间隔(防高频)：突发多次捕获只推一次，也防失败高频重试
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
-var VERSION = "V1.02";
+var VERSION = "V1.03";
 var QL_ENV_NAME = "QDREADER_COOKIE";          // 青龙 Cookie 环境变量名（固定值）
 var QL_TASK_KEY = "qdreader";                 // 青龙签到任务匹配关键词（固定值：任务命令含 qdreader 即命中，如 task qdreader.js）
 var UID_SPLIT_INDEX = 11;                     // base64(QDHeader).split('|') 中 uid 的下标（与主脚本一致）
@@ -253,8 +254,9 @@ function registerUid(uid) {
   if (uids.indexOf(uid) < 0) { uids.push(uid); sSet(K_UIDS, uids.join(",")); }
 }
 var K_BUSY = "QDCK_BUSY";              // 全局单飞锁：推送进行中标记(存开始时间戳)。
-// 说明：QDREADER_COOKIE 是多账号共享的 JSON Map，推送是「读-改-写」全局操作，
-// 因此用全局锁（而非按 uid 的锁）串行化，避免两个账号的交错写互相覆盖。
+// 说明：QDREADER_COOKIE 虽只保留一个账号，推送仍涉及「查环境-写变量-同步开关-触发任务」多步，
+// 用全局锁串行化，避免两个账号交错时开关重复同步/触发排队错乱；
+// 并发捕获时持锁实例按捕获顺序续推（后捕获的覆盖先捕获的），最后写入者生效。
 
 // ========== 工具 ==========
 function clip(s, n) { s = (s === undefined || s === null) ? "" : String(s); return s.length > n ? s.slice(0, n) + "…" : s; }
@@ -501,9 +503,10 @@ function enableEnv(label, t, id) {
   qlReq("PUT", "/open/envs/enable", [id], t, function (e) { if (e) log("[" + (label || "启用环境") + "] 启用失败 " + e); }, 1, label || "启用环境");
 }
 
-// ========== 合并推送 ==========
-// 读现值 → 合并（同 uid 覆盖 / 新 uid 新增 / 其他账号原样保留）→ 写回。
-// 变量不存在时新建；现值不是 JSON 时原值备份到 <uid>_backup 键并告警，绝不清空（避免丢其他账号）。
+// ========== 覆盖推送（单账号语义） ==========
+// 变量值永远是一对键值 {"<uid>":"cookie"}：获取到新 cookie 即整体覆盖写入，
+// 青龙里只保留最新捕获的一个账号（qdreader.js 一次运行覆盖全部账号，单账号即全量）。
+// 变量不存在时新建；现值无论是其他账号还是手填的非 JSON 值，都被覆盖——日志说明被替换掉的内容，不做备份。
 function pushCookie(uid, cookie, cb) {
   getToken("取token", function (e, tok) {
     if (e) return cb(false, "token失败: " + e);
@@ -512,38 +515,39 @@ function pushCookie(uid, cookie, cb) {
       var tgt = null;
       for (var i = 0; i < envs.length; i++) { if (envs[i] && envs[i].name === QL_ENV_NAME) { tgt = envs[i]; break; } }
 
+      var single = {};
+      single[uid] = cookie;
+      var nv = JSON.stringify(single);
+
       if (!tgt) {
         // 青龙还没有该变量：新建，value 即 {"<uid>":"cookie"}
-        var init = {};
-        init[uid] = cookie;
-        var nv = JSON.stringify(init);
         return newEnv("新建环境", tok, nv, function (e3, nid) {
           if (e3) return cb(false, "新建失败: " + e3);
           if (nid) enableEnv("启用环境", tok, nid);
-          cb(true, "已新建 " + QL_ENV_NAME + " 并写入账号");
+          cb(true, "已新建 " + QL_ENV_NAME + " 并写入 uid=" + uid);
         });
       }
 
+      // 覆盖写：解析旧值只为在日志里说明被替换掉了什么，不参与合并
       var raw = String(tgt.value || "");
-      var map = {};
-      var badValue = false;
+      var oldUids = null, badValue = false;
       try {
-        map = JSON.parse(raw);
-        if (!map || typeof map !== "object" || Array.isArray(map)) { map = {}; badValue = true; }
-      } catch (e4) { map = {}; badValue = true; }
+        var om = JSON.parse(raw);
+        if (om && typeof om === "object" && !Array.isArray(om)) oldUids = Object.keys(om);
+        else badValue = true;
+      } catch (e4) { badValue = true; }
       if (badValue) {
-        log("⚠️ 青龙 " + QL_ENV_NAME + " 现值不是 JSON Map（可能是手填的原始 cookie），已原值备份到键 " + uid + "_backup，不清空。");
-        if (raw) map[uid + "_backup"] = raw;
+        log("⚠️ 青龙 " + QL_ENV_NAME + " 现值不是 JSON Map（可能是手填的原始 cookie），按覆盖语义替换为 uid=" + uid + "（变量只保留最新捕获的账号，不做备份）。");
+      } else if (oldUids && oldUids.length === 1 && oldUids[0] === uid) {
+        // 同账号刷新：常规覆盖，无需告警
+      } else if (oldUids && oldUids.length) {
+        log("⚠️ 青龙 " + QL_ENV_NAME + " 现值含账号 uid=" + oldUids.join(",") + "，按覆盖语义替换为 uid=" + uid + "（变量只保留最新捕获的账号）。");
       }
 
-      var isNew = !Object.prototype.hasOwnProperty.call(map, uid);
-      map[uid] = cookie;
-      var nv2 = JSON.stringify(map);
-      var tid = tgt.id, tst = tgt.status, trm = tgt.remarks;
-      updEnv("更新变量", tok, tid, nv2, trm, function (e5) {
+      updEnv("更新变量", tok, tgt.id, nv, tgt.remarks, function (e5) {
         if (e5) return cb(false, "更新失败: " + e5);
-        if (tst !== undefined && tst !== null && tst !== 0) enableEnv("启用环境", tok, tid);
-        cb(true, (isNew ? "新增账号" : "更新账号") + " uid=" + uid + "（共 " + Object.keys(map).length + " 个键）");
+        if (tgt.status !== undefined && tgt.status !== null && tgt.status !== 0) enableEnv("启用环境", tok, tgt.id);
+        cb(true, "已覆盖写入 uid=" + uid + "（变量只保留该账号）");
       });
     });
   });
@@ -566,7 +570,7 @@ function triggerTask(t, cb) {
         names.push(c.name || cmd);
       }
     }
-    if (!ids.length) return cb(false, "未找到命令包含「" + QL_TASK_KEY + "」且已启用的任务（请检查青龙任务命令或 TASK_KEY 参数）");
+    if (!ids.length) return cb(false, "未找到命令包含「" + QL_TASK_KEY + "」且已启用的任务（请检查青龙任务命令，需含 qdreader 且状态为启用）");
     qlReq("PUT", "/open/crons/run", ids, t, function (e2) {
       if (e2) return cb(false, "触发失败: " + e2);
       cb(true, "已触发 " + ids.length + " 个签到任务：" + names.join("、"));
@@ -575,21 +579,22 @@ function triggerTask(t, cb) {
 }
 
 // ========== 单飞锁 + 最新值优先 ==========
-// QDREADER_COOKIE 是多账号共享变量，推送是全局「读-改-写」：
-//  - 全局锁保证同一时刻只有一个实例在推送，避免两个账号交错写互相覆盖；
+// 变量只保留一个账号，推送仍串行执行：
+//  - 全局锁保证同一时刻只有一个实例在推送（查环境/写变量/同步开关/触发任务不交错）；
 //  - 推送期间新捕获的 cookie 记入 K_CAP_<uid>，持锁实例每轮结束后扫描注册表，
-//    把其他账号“已捕获但未推送”的项续推上去，最多 MAX_ROUNDS 轮；
-//  - 最终写进青龙的是每个账号“最后看到的 cookie”，不会丢新值也不会被旧值反序覆盖。
+//    把后续捕获的账号依次覆盖写入，最多 MAX_ROUNDS 轮；
+//  - 最终写进青龙的是「最后捕获的账号」的 cookie（覆盖语义，最新获胜）。
 function getBusy() { return Number(sGet(K_BUSY) || "0"); }
 function setBusy() { sSet(K_BUSY, String(Date.now())); }
 function clearBusy() { sSet(K_BUSY, "0"); }
 
-// 扫描注册表，返回下一个待推送的 {uid, cookie}（优先触发账号，其次其他账号）
-function pickNextPending(preferUid) {
+// 扫描注册表，返回下一个待推送的 {uid, cookie}（优先触发账号，其次其他账号）。
+// force=true（相同cookie的强制推送路径）：触发账号即使与上次已推送值相同也要推一遍。
+function pickNextPending(preferUid, force) {
   var uids = listUids();
   if (preferUid) {
     var cap = getCap(preferUid);
-    if (cap && cap !== getLastKey(preferUid)) return { uid: preferUid, cookie: cap };
+    if (cap && (force || cap !== getLastKey(preferUid))) return { uid: preferUid, cookie: cap };
   }
   for (var i = 0; i < uids.length; i++) {
     var u = uids[i];
@@ -602,27 +607,33 @@ function pickNextPending(preferUid) {
 // 推送闭环：串行推送所有待推送账号 → 二次复核 → 按开关触发签到任务 → 通知。
 // 持锁后先同步任务开关（带 5min 节流），再进行各轮 cookie 推送——
 // 这样两次触发只会有一个实例做开关同步，杜绝并发重复请求青龙导致的超时。
-// cb(ok, msg, skip, pushedCookie)：pushedCookie 为触发账号实际落地的 cookie。
-function pushLatest(uid, cb) {
+// force：相同cookie的强制推送（ decidePush 缓冲窗口内无更新时 ）也走真实推送，不再误入「无待推送账号」。
+// cb(ok, msg, skip, pushedCookie, lastPushed)：lastPushed 为最后成功落地的 {uid, cookie}
+// （并发续推时可能是比本次捕获更新的账号，二次复核以它为准）。
+function pushLatest(uid, force, cb) {
   var _busy = getBusy();
   if (_busy && Date.now() - _busy < BUSY_TTL) {
     // 已有实例在推送，本次只更新最新 cookie（已在 run 顶部 setCap），交由持锁实例续推
-    return cb(false, "并发突发：已有推送在进行，最新值已记录，将由持锁实例续推", true, null);
+    return cb(false, "并发突发：已有推送在进行，最新值已记录，将由持锁实例续推", true, null, null);
   }
   setBusy();
   maybeSyncSwitches(function () {
     var rounds = 0;
-    var anyOk = false, pushedCookie = null, lastMsg = "";
+    var anyOk = false, pushedCookie = null, lastMsg = "", lastPushed = null;
     function step() {
       rounds++;
-      var t = pickNextPending(uid);
+      // 强制推送只在首轮生效：首轮把触发账号的当前值推上去；后续轮次按「有新捕获才推」扫描，
+      // 避免相同cookie被 force 反复重推（每轮都查一遍其他账号的新捕获，后捕获的覆盖先捕获的）。
+      var t = pickNextPending(uid, force && rounds === 1);
       if (!t) {
         clearBusy();
-        return cb(anyOk, lastMsg || "无待推送账号", false, pushedCookie);
+        return cb(anyOk, lastMsg || "无待推送账号", false, pushedCookie, lastPushed);
       }
       pushCookie(t.uid, t.cookie, function (ok, msg) {
         if (ok) {
           setLastKey(t.uid, t.cookie);
+          setPushed(t.uid, t.cookie);
+          lastPushed = { uid: t.uid, cookie: t.cookie };
           anyOk = true; lastMsg = msg;
           if (t.uid === uid) pushedCookie = t.cookie;
           log("- 账号 uid=" + t.uid + "：" + msg);
@@ -630,10 +641,10 @@ function pushLatest(uid, cb) {
           lastMsg = msg;
           log("- 账号 uid=" + t.uid + " 推送失败：" + msg);
         }
-        var next = pickNextPending(uid);
+        var next = pickNextPending(uid, false);
         if (next && rounds < MAX_ROUNDS) { step(); return; }
         clearBusy();
-        cb(anyOk, lastMsg, false, pushedCookie);
+        cb(anyOk, lastMsg, false, pushedCookie, lastPushed);
       });
     }
     step();
@@ -647,7 +658,9 @@ function pushLatest(uid, cb) {
 
 // 推送结果回调：成功/失败的统一处理（含触发签到、二次复核、失败限频通知）
 // preLast：本次推送前的「上次已推送 cookie」基准；仅当实际落地的 cookie 与它不同（=真的换了 cookie）才发成功通知。
-function onPushed(uid, cookie, ok2, msg, skip, pushedCookie, preLast) {
+// lastPushed：最后成功落地的 {uid, cookie}（并发续推时可能是比本次捕获更新的账号）；
+//             二次复核以它为准——覆盖语义下变量只留一个账号，复核触发账号会误报未落地。
+function onPushed(uid, cookie, ok2, msg, skip, pushedCookie, preLast, lastPushed) {
   if (skip) { log("- 并发突发：已由其他实例推送最新值，本次跳过。"); log("- 通知：未发送（由持锁实例负责推送与通知）。"); log(""); finish(); return; }
   if (ok2) {
     var _ck = pushedCookie || cookie;   // 实际落地到青龙的 cookie（并发续推时可能是比本次捕获更新的 cookie）
@@ -656,15 +669,19 @@ function onPushed(uid, cookie, ok2, msg, skip, pushedCookie, preLast) {
     log("- 推送结果：成功（" + msg + "）");
     var _isNewCK = !preLast || _ck !== preLast;   // 相对推送前基准：是否真的换了 cookie
     if (_isNewCK) {
-      log("- 通知：已发送「起点Cookie推送青龙成功」（cookie 已打码）。");
-      notify("起点Cookie推送青龙成功", "uid: " + uid, "Cookie已推送青龙 | " + msg + " | cookie: " + maskCookie(_ck));
+      var _suffix = (lastPushed && lastPushed.uid && lastPushed.uid !== uid) ? ("（最新生效账号 uid=" + lastPushed.uid + "）") : "";
+      log("- 通知：已发送「起点Cookie推送青龙成功」（cookie 已打码）。" + (_suffix ? _suffix : ""));
+      notify("起点Cookie推送青龙成功", "uid: " + uid, "Cookie已推送青龙 | " + msg + _suffix + " | cookie: " + maskCookie(_ck));
     } else {
       log("- 已按设置强制推送刷新青龙；通知：未发送（青龙已为该 cookie，同值不重复提醒，避免刷屏）。");
     }
     // 二次复核：重新拉取青龙确认最新 cookie 已落地，消除“日志失败但青龙已更新”的歧义
+    // 覆盖语义下以「最后成功落地的账号」为复核对象（变量里只会有它）
+    var _vu = (lastPushed && lastPushed.uid) || uid;
+    var _vc = (lastPushed && lastPushed.cookie) || _ck;
     getToken("复核取token", function (e, tok) {
       if (e) { log("- 二次复核：取 token 失败（" + e + "），无法确认；以青龙侧实际为准。"); log(""); return finish(); }
-      verifyCookie(tok, uid, _ck, function (vf, vm) {
+      verifyCookie(tok, _vu, _vc, function (vf, vm) {
         log("- 二次复核：" + (vf ? "✅ " + vm : "⚠️ " + vm));
         log("");
         // 推送后触发签到任务（开关）
@@ -721,7 +738,7 @@ function decidePush(uid, cookie) {
   if (changed) {
     log("- 获取到不同起点Cookie，根据设置开始推送青龙面板……");
     var _pre = getLastKey(uid);
-    pushLatest(uid, function (ok2, msg, skip, pk) { onPushed(uid, cookie, ok2, msg, skip, pk, _pre); });
+    pushLatest(uid, false, function (ok2, msg, skip, pk, lp) { onPushed(uid, cookie, ok2, msg, skip, pk, _pre, lp); });
   } else {
     log("- 获取到相同起点Cookie，进入 " + (DEBOUNCE_MS / 1000) + "s 缓冲：等待后续捕获，若出现更新 cookie 则改推最新值，避免把刷新前的旧 cookie 推上去。");
     setTimeout(function () {
@@ -730,7 +747,7 @@ function decidePush(uid, cookie) {
       var _pre2 = getLastKey(uid);
       if (changed2) {
         log("- 缓冲期内出现更新 cookie：获取到不同起点Cookie，根据设置开始推送青龙面板……");
-        pushLatest(uid, function (ok2, msg, skip, pk) { onPushed(uid, cookie, ok2, msg, skip, pk, _pre2); });
+        pushLatest(uid, false, function (ok2, msg, skip, pk, lp) { onPushed(uid, cookie, ok2, msg, skip, pk, _pre2, lp); });
       } else {
         // 窗口内无更新：相同cookie按设置强制推送；若该 cookie 刚推送成功过(PUSH_GAP 内)则无需重复往返
         var _pd = getPushed(uid);
@@ -742,7 +759,7 @@ function decidePush(uid, cookie) {
           return;
         }
         log("- 获取到相同起点Cookie，根据设置开始推送青龙面板……（强制推送）");
-        pushLatest(uid, function (ok2, msg, skip, pk) { onPushed(uid, cookie, ok2, msg, skip, pk, _pre2); });
+        pushLatest(uid, true, function (ok2, msg, skip, pk, lp) { onPushed(uid, cookie, ok2, msg, skip, pk, _pre2, lp); });
       }
     }, DEBOUNCE_MS);
   }

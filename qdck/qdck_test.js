@@ -181,17 +181,17 @@ function check(desc, cond) {
   });
   const ckEnv3 = r.ql.envs.find(e => e.name === "QDREADER_COOKIE");
   check("Cookie 变量已新建", !!ckEnv3);
-  check("value 为 JSON Map 且含 uid=10001", (() => { try { const m = JSON.parse(ckEnv3.value); return m["10001"] === ck3; } catch (e) { return false; } })());
+  check("value 为 JSON 单键值对且含 uid=10001", (() => { try { const m = JSON.parse(ckEnv3.value); return m["10001"] === ck3 && Object.keys(m).length === 1; } catch (e) { return false; } })());
   check("6 个任务开关变量已同步新建", ["QDREADER_ADV_JOB_ENABLE","QDREADER_EXTRA_ADV_JOB_ENABLE","QDREADER_LOTTERY_ENABLE","QDREADER_WEEKLY_EXCHANGE_ENABLE","QDREADER_CHAPTER_CARD_ENABLE","QDREADER_MESSAGE_BOX_ENABLE"].every(n => r.ql.envs.some(e => e.name === n)));
   check("签到任务已触发（仅 status=0 的 qdreader）", JSON.stringify(r.ql.triggered) === "[1]");
   check("发送成功通知", r.notifs.some(n => n.title === "起点Cookie推送青龙成功"));
   check("日志含二次复核✅", r.logs.some(l => l.indexOf("二次复核：✅") >= 0));
 
-  // ===== 场景4：已有其他账号 → 合并保留 + 同 uid 更新 =====
-  console.log("\n===== 场景4：合并（新账号追加，其他账号保留） =====");
+  // ===== 场景4：已有其他账号 → 覆盖替换（只保留新账号） =====
+  console.log("\n===== 场景4：覆盖（新账号替换旧账号） =====");
   const oldCk = "ywKey=OLDKEY; ywGuid=OLDGUID; QDHeader=xxx; uid=20002";
   const ck4new = makeCookie("30003");
-  r = await runScenario("merge-add", {
+  r = await runScenario("overwrite-replace", {
     argument: ARG,
     request: { headers: { Cookie: ck4new } },
     ql: { envs: [{ id: 55, name: "QDREADER_COOKIE", value: JSON.stringify({ "20002": oldCk }), status: 0, remarks: "" }] },
@@ -199,12 +199,14 @@ function check(desc, cond) {
   });
   let m4 = null;
   try { m4 = JSON.parse(r.ql.envs.find(e => e.id === 55).value); } catch (e) {}
-  check("旧账号 20002 原样保留", m4 && m4["20002"] === oldCk);
-  check("新账号 30003 已新增", m4 && m4["30003"] === ck4new);
+  check("旧账号 20002 已被覆盖移除", m4 && m4["20002"] === undefined);
+  check("新账号 30003 已写入", m4 && m4["30003"] === ck4new);
+  check("变量只有一对键值", m4 && Object.keys(m4).length === 1);
+  check("日志含覆盖告警（说明被替换的旧账号）", r.logs.some(l => l.indexOf("按覆盖语义替换") >= 0 && l.indexOf("20002") >= 0));
   check("未误触发其他任务", JSON.stringify(r.ql.triggered) === "[1]");
 
-  // ===== 场景5：同 uid 更新（覆盖值，账号数不变） =====
-  console.log("\n===== 场景5：同 uid 更新 =====");
+  // ===== 场景5：同 uid 更新（覆盖为单账号，其他账号被替换） =====
+  console.log("\n===== 场景5：同 uid 更新（覆盖为单账号） =====");
   const ck5old = makeCookie("40004", "extra=1");
   const ck5new = makeCookie("40004", "extra=2");
   r = await runScenario("update-same-uid", {
@@ -216,12 +218,12 @@ function check(desc, cond) {
   let m5 = null;
   try { m5 = JSON.parse(r.ql.envs.find(e => e.id === 56).value); } catch (e) {}
   check("uid=40004 的值已更新", m5 && m5["40004"] === ck5new);
-  check("其他账号 50005 保留", m5 && m5["50005"] === "keepme");
-  check("账号键数量不变（2个）", m5 && Object.keys(m5).length === 2);
+  check("其他账号 50005 已被覆盖移除", m5 && m5["50005"] === undefined);
+  check("变量只有一对键值", m5 && Object.keys(m5).length === 1);
   check("发送更新通知", r.notifs.some(n => n.title === "起点Cookie推送青龙成功"));
 
-  // ===== 场景6：现值非 JSON → 备份不清空 =====
-  console.log("\n===== 场景6：现值非 JSON（手填原始cookie） =====");
+  // ===== 场景6：现值非 JSON → 直接覆盖，不备份 =====
+  console.log("\n===== 场景6：现值非 JSON（手填原始cookie，直接覆盖） =====");
   const ck6 = makeCookie("60006");
   r = await runScenario("bad-json", {
     argument: ARG,
@@ -231,9 +233,10 @@ function check(desc, cond) {
   });
   let m6 = null;
   try { m6 = JSON.parse(r.ql.envs.find(e => e.id === 57).value); } catch (e) {}
-  check("原值备份到 60006_backup 键", m6 && m6["60006_backup"] === "ywKey=MANUAL;ywGuid=MANUAL2");
+  check("无备份键（60006_backup 不存在）", m6 && m6["60006_backup"] === undefined);
   check("新 cookie 正常写入", m6 && m6["60006"] === ck6);
-  check("日志有备份告警", r.logs.some(l => l.indexOf("备份") >= 0 && l.indexOf("不清空") >= 0));
+  check("变量只有一对键值", m6 && Object.keys(m6).length === 1);
+  check("日志有覆盖告警（非JSON现值被替换）", r.logs.some(l => l.indexOf("按覆盖语义替换") >= 0));
 
   // ===== 场景7：RUN_SIGN=false → 不触发任务 =====
   console.log("\n===== 场景7：RUN_SIGN=关（不触发签到） =====");
@@ -328,7 +331,7 @@ function check(desc, cond) {
   check("MESSAGE_BOX 被禁用后恢复启用(status=0)", (() => { const e = r.ql.envs.find(x => x.id === 72); return e && e.status === 0; })());
   check("缺失的开关已新建且值为 true", ["QDREADER_EXTRA_ADV_JOB_ENABLE","QDREADER_WEEKLY_EXCHANGE_ENABLE","QDREADER_CHAPTER_CARD_ENABLE"].every(n => { const e = r.ql.envs.find(x => x.name === n); return e && e.value === "true"; }));
   check("新建开关备注为中文任务名", (() => { const e = r.ql.envs.find(x => x.name === "QDREADER_EXTRA_ADV_JOB_ENABLE"); return e && e.remarks === "每日任务"; })());
-  check("Cookie 推送不受开关同步影响", (() => { try { const m = JSON.parse(r.ql.envs.find(e => e.id === 73).value); return !!m["14014"]; } catch (e) { return false; } })());
+  check("Cookie 推送不受开关同步影响", (() => { try { const m = JSON.parse(r.ql.envs.find(e => e.id === 73).value); return !!m["14014"] && Object.keys(m).length === 1; } catch (e) { return false; } })());
 
   // ===== 场景14：插件参数未传开关（模拟默认值） =====
   console.log("\n===== 场景14：开关默认值（参数未传） =====");
@@ -352,7 +355,7 @@ function check(desc, cond) {
   check("忽略传入的 ENV_NAME，仍写 QDREADER_COOKIE", r.ql.envs.some(e => e.name === "QDREADER_COOKIE") && !r.ql.envs.some(e => e.name === "SHOULD_BE_IGNORED"));
   check("cookie 已写入 QDREADER_COOKIE", (() => { try { const m = JSON.parse(r.ql.envs.find(e => e.id === 74).value); return !!m["16016"]; } catch (e) { return false; } })());
 
-  // ===== 场景16：两个账号先后触发（并发） → 开关只同步一轮 + 锁挡第二个 + 持锁者续推 =====
+  // ===== 场景16：两个账号并发触发 → 开关只同步一轮 + 锁挡第二个 + 持锁者续推覆盖 =====
   console.log("\n===== 场景16：多账号并发（开关只同步一次） =====");
   {
     const sharedQL = makeQL({ envs: [{ id: 80, name: "QDREADER_COOKIE", value: "{}", status: 0, remarks: "" }] });
@@ -372,12 +375,13 @@ function check(desc, cond) {
     check("开关 POST 只发生一轮（6 次）", swPosts.length === 6);
     check("实例 B 被单飞锁挡下（日志含并发突发）", allLogs.indexOf("并发突发") >= 0);
     check("开关同步日志只出现一次", (allLogs.match(/按插件设置同步至青龙环境变量/g) || []).length === 1);
-    check("两个账号 cookie 都已写入（持锁实例续推）", (() => {
+    check("变量最终只含最后续推的账号 17118（覆盖语义）", (() => {
       try {
         const m = JSON.parse(sharedQL.state.envs.find(e => e.id === 80).value);
-        return !!m["17017"] && !!m["17118"];
+        return Object.keys(m).length === 1 && !!m["17118"];
       } catch (e) { return false; }
     })());
+    check("签到任务只触发一次（突发收敛为一次运行）", JSON.stringify(sharedQL.state.triggered) === "[1]");
   }
 
   // ===== 场景17：开关节流（5min 内第二次触发不重复同步） =====
@@ -397,6 +401,62 @@ function check(desc, cond) {
     check("第二次被开关节流跳过", r17b.logs.some(l => l.indexOf("秒前刚同步过，跳过") >= 0));
     check("第二次无开关 POST", r17b.ql.posts.filter(n => n !== "QDREADER_COOKIE").length === 0);
     check("第二次 cookie 仍正常推送", r17b.ql.posts.indexOf("QDREADER_COOKIE") >= 0);
+  }
+
+  // ===== 场景18：覆盖链 A→B→A2：变量永远只有最新捕获的一个账号 =====
+  console.log("\n===== 场景18：覆盖链（最新捕获获胜） =====");
+  {
+    const sharedQL3 = makeQL({ envs: [{ id: 90, name: "QDREADER_COOKIE", value: "{}", status: 0, remarks: "" }] });
+    const sharedStore3 = {};
+    const ckA = makeCookie("21021");
+    const ckB = makeCookie("22022");
+    const ckA2 = makeCookie("21021", "extra=rotated");
+    await runScenario("chain-a", {
+      argument: ARG, request: { headers: { Cookie: ckA } },
+      qlState: sharedQL3.state, qlRoutes: sharedQL3.routes, store: sharedStore3, wait: 12000
+    });
+    const m18a = (() => { try { return JSON.parse(sharedQL3.state.envs.find(e => e.id === 90).value); } catch (e) { return null; } })();
+    check("A 推送后变量只含 21021", m18a && Object.keys(m18a).length === 1 && m18a["21021"] === ckA);
+    await runScenario("chain-b", {
+      argument: ARG, request: { headers: { Cookie: ckB } },
+      qlState: sharedQL3.state, qlRoutes: sharedQL3.routes, store: sharedStore3, wait: 12000
+    });
+    const m18b = (() => { try { return JSON.parse(sharedQL3.state.envs.find(e => e.id === 90).value); } catch (e) { return null; } })();
+    check("B 推送后变量只含 22022（A 被覆盖移除）", m18b && Object.keys(m18b).length === 1 && m18b["22022"] === ckB);
+    const r18c = await runScenario("chain-a2", {
+      argument: ARG, request: { headers: { Cookie: ckA2 } },
+      qlState: sharedQL3.state, qlRoutes: sharedQL3.routes, store: sharedStore3, wait: 12000
+    });
+    const m18c = (() => { try { return JSON.parse(sharedQL3.state.envs.find(e => e.id === 90).value); } catch (e) { return null; } })();
+    check("A 换新cookie再推送，变量只含新的 21021（B 被覆盖移除）", m18c && Object.keys(m18c).length === 1 && m18c["21021"] === ckA2);
+    check("第三次推送日志含覆盖告警（22022 被替换）", r18c.logs.some(l => l.indexOf("按覆盖语义替换") >= 0 && l.indexOf("22022") >= 0));
+    check("三次推送各触发一次签到（按需触发，不合并）", sharedQL3.state.triggered.length === 3);
+  }
+
+  // ===== 场景19：相同cookie超过30s → 强制推送路径（V1.02 曾误入「无待推送账号」失败分支） =====
+  console.log("\n===== 场景19：相同cookie强制推送 =====");
+  {
+    const ck19 = makeCookie("23023");
+    const store19 = {};
+    // 预置 store：该 cookie 已推送成功过（lastKey/pushed 同值），但推送尝试发生在 60s 前（绕过 30s 节流）
+    store19["QDCK_LAST_23023"] = ck19;
+    store19["QDCK_PUSHED_23023"] = ck19 + "|" + (Date.now() - 60000);
+    store19["QDCK_TRYKEY_23023"] = ck19;
+    store19["QDCK_TRY"] = String(Date.now() - 60000);
+    const r19 = await runScenario("force-push", {
+      argument: ARG,
+      request: { headers: { Cookie: ck19 } },
+      ql: { envs: [{ id: 95, name: "QDREADER_COOKIE", value: JSON.stringify({ "23023": ck19 }), status: 0, remarks: "" }] },
+      store: store19,
+      wait: 12000
+    });
+    check("走了强制推送路径（日志含强制推送）", r19.logs.some(l => l.indexOf("强制推送") >= 0));
+    check("推送成功（未误入失败分支）", r19.logs.some(l => l.indexOf("推送结果：成功") >= 0));
+    check("相同cookie只推一轮（不重复重推）", (r19.logs.join("\n").match(/- 账号 uid=23023：/g) || []).length === 1);
+    check("变量仍为该账号单键值", (() => { try { const m = JSON.parse(r19.ql.envs.find(e => e.id === 95).value); return m["23023"] === ck19 && Object.keys(m).length === 1; } catch (e) { return false; } })());
+    check("同值不重复通知（无成功通知）", !r19.notifs.some(n => n.title === "起点Cookie推送青龙成功"));
+    check("无失败通知", !r19.notifs.some(n => n.title === "起点Cookie推送青龙失败"));
+    check("签到任务已触发", JSON.stringify(r19.ql.triggered) === "[1]");
   }
 
   console.log("\n========================================");
