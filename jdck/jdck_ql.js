@@ -180,7 +180,7 @@ function classifyQLFailure(status, rawData) {
 var QL_HTTP_TIMEOUT = 15000; // 单次 httpClient 超时（毫秒）。此前 10s 在直连 Cloudflare 边缘抖动时易超时，放宽到 15s 吸收抖动
 var QL_MAX_RETRY = 3;        // 网络错误最多尝试次数（含首次）。给瞬断/隧道抖动留余地：最多 3 次、2 次延迟重试
 var QL_RETRY_DELAY = 2000;   // 网络错误重试前的等待(毫秒)。立即连重试常撞上同一瞬断，等待 2s 让连接恢复再试
-var QL_HTTP_NODE = "DIRECT"; // 出站节点：DIRECT=直连(不经 Loon 代理)。青龙为公网域名时直连最快最稳；若你的网络必须走某节点才能访问，改成该节点名
+var QL_HTTP_NODE = ""; // 出站节点：留空 = 走 Loon 正常代理路由（按你的代理规则/策略选路，即「通过 Loon 代理访问」）；若需强制直连或指定某节点，改成 "DIRECT" 或节点名
 function qlReq(method, path, body, token, cb, _attempt, _label) {
   _attempt = _attempt || 1;
   var _lab = _label ? ("[" + _label + "] ") : "";
@@ -189,7 +189,8 @@ function qlReq(method, path, body, token, cb, _attempt, _label) {
   // Cloudflare Access 服务令牌：所有青龙请求统一带上，隧道域名即便泄露也无令牌即被边缘拒绝
   if (QL_ACCESS_ID) h["CF-Access-Client-Id"] = QL_ACCESS_ID;
   if (QL_ACCESS_SECRET) h["CF-Access-Client-Secret"] = QL_ACCESS_SECRET;
-  var opt = { url: QL_URL + path, headers: h, timeout: QL_HTTP_TIMEOUT, node: QL_HTTP_NODE };
+  var opt = { url: QL_URL + path, headers: h, timeout: QL_HTTP_TIMEOUT };
+  if (QL_HTTP_NODE) opt.node = QL_HTTP_NODE; // 留空则走 Loon 默认代理路由（不强制 DIRECT）
   if (body !== undefined && body !== null) {
     var bodyStr = JSON.stringify(body);
     if (bodyStr) opt.body = bodyStr;
@@ -559,7 +560,7 @@ function run() {
   }
 
   log("2、推送CK至青龙面板。");
-  log("- 目标=" + hostOf(QL_URL) + " | 出站=" + QL_HTTP_NODE + (QL_ACCESS_ID ? " | CloudflareAccess=开" : " | CloudflareAccess=关"));
+  log("- 目标=" + hostOf(QL_URL) + " | 出站=" + (QL_HTTP_NODE || "Loon代理(默认路由)") + (QL_ACCESS_ID ? " | CloudflareAccess=开" : " | CloudflareAccess=关"));
   decidePush(ptPin, ptKey);
   return;
 }
