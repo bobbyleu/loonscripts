@@ -6,7 +6,7 @@
 // 参数通过 Loon 插件「参数面板」设置（导入后在 Loon → 脚本 → 点开本脚本 → 参数 中可见）：
 //   CLIENT_ID / CLIENT_SECRET : 青龙面板「系统设置-应用设置-开放授权」密钥
 //   QL_URL                   : 青龙面板地址（**无默认值，必须由用户在插件参数填写**，如 https://your-domain.com）
-//   PUSH                     : 推送青龙（true=捕获到新 key 时推送 / false=仅抓取不推送）
+//   PUSH                     : 推送青龙（true=获取到CK即推送：不同CK立即推并通知，相同CK也按设置强制推送、同值不重复通知 / false=仅抓取不推送）
 //   CF_ACCESS_ID / CF_ACCESS_SECRET : Cloudflare Access 服务令牌（可选，为青龙请求加边缘鉴权）
 // 兼容 $persistentStore 兜底。
 
@@ -14,10 +14,10 @@
 var QL_URL = "";   // 默认空：青龙地址必须由用户在 Loon 参数 QL_URL 中填写，脚本不预置任何地址（避免暴露）
 var WHITELIST_MODE = false;                   // true=仅白名单内账号写入青龙
 var PT_PIN_WHITELIST = [];                    // 白名单 pt_pin，如 ["JD_xxx","JD_yyy"]
-var PUSH_GAP = 30 * 1000;                     // 同一 key 推送失败后的最小重试间隔(防高频)
+var PUSH_GAP = 30 * 1000;                     // 同一 key 两次推送尝试的最小间隔(防高频)：突发多次捕获只推一次，也防失败高频重试
 // （NOTIFY_OK_GAP 已移除：不再发送“pt_key未变”心跳通知；开启推送即强制推送）
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
-var VERSION = "V1.38";
+var VERSION = "V1.39";
 
 // ========== 参数解析 ==========
 // Loon 3.5.x 的 [Argument] 占位式 argument=[{CLIENT_ID},{...}] 运行期会把 $argument
@@ -137,6 +137,9 @@ function getLastKey(pin) { return sGet(lastKeyStore(pin)); }
 function setLastKey(pin, key) { sSet(lastKeyStore(pin), key); }
 var K_FAIL_NOTIFY = "JDCK_FAILNOTIFY"; // 上次「推送失败」通知时间
 var K_TRYKEY = "JDCK_TRYKEY_";         // 上次尝试推送的 key（前缀，拼接 pt_pin）
+var K_PUSHED = "JDCK_PUSHED_";         // 上次成功推送的 key|时间戳（前缀，拼接 pt_pin）：相同CK强制推送时去重，避免刚推过又重复往返
+function getPushed(pin) { var v = sGet(K_PUSHED + pin); var i = v.indexOf("|"); return i < 0 ? { key: "", t: 0 } : { key: v.slice(0, i), t: Number(v.slice(i + 1) || "0") }; }
+function setPushed(pin, key) { sSet(K_PUSHED + pin, key + "|" + Date.now()); }
 var K_CAP = "JDCK_CAP_";               // 最新捕获的 pt_key（每次捕获都写，供单飞锁补推最新值）
 function getCap(pin) { return sGet(K_CAP + pin); }
 function setCap(pin, key) { sSet(K_CAP + pin, key); }
@@ -145,7 +148,7 @@ function getBusy(pin) { return Number(sGet(K_BUSY + pin) || "0"); }
 function setBusy(pin) { sSet(K_BUSY + pin, String(Date.now())); }
 function clearBusy(pin) { sSet(K_BUSY + pin, "0"); }
 var BUSY_TTL = 55 * 1000;             // 单飞锁有效期(ms)，略小于脚本超时(60s)，超时自动失效防死锁
-var DEBOUNCE_MS = 4000;                // 未变化捕获的缓冲窗口(ms)：京东App打开稳定触发多次捕获，等待后续是否出现更新 key，避免把刷新前的旧 key 推上去
+var DEBOUNCE_MS = 4000;                // 相同CK的缓冲窗口(ms)：京东App打开稳定触发多次捕获，等待后续是否出现更新 key；窗口内无更新则按设置强制推送当前值（相同CK也推，同值不重复通知）
 
 // ========== 工具 ==========
 function clip(s, n) { s = (s === undefined || s === null) ? "" : String(s); return s.length > n ? s.slice(0, n) + "…" : s; }
@@ -382,18 +385,28 @@ function pushLatest(pin, cb) {
   step();
 }
 
-// 获取到 pt_key 后：不再「每次捕获」都发通知（稳定多次触发会刷屏）；
-// 仅在推送成功/失败时通知一次，成功通知同时告知「CK 获取成功 + 已推送青龙」。
+// 通知策略（避免多次触发刷屏）：
+//  - 推送成功且 CK 相对推送前已变化 → 发一条「CK获取并推送青龙成功」（pt_key 打码）；
+//  - CK 未变化的强制推送（设置=开）→ 静默落地，不通知；
+//  - 推送失败 → 「ck推送青龙失败」限频 10min。
 
 // 推送结果回调：成功/失败的统一处理（含二次复核、失败限频通知）
-function onPushed(pin, ptKey, ok2, msg, skip, pushedKey) {
+// preLast：本次推送前的「上次已推送 key」基准；仅当实际落地的 key 与它不同（=真的换了 CK）才发成功通知，
+// 相同 CK 的强制推送只静默刷新青龙，避免每次开 App 都通知。
+function onPushed(pin, ptKey, ok2, msg, skip, pushedKey, preLast) {
   if (skip) { log("- 并发突发：已由其他实例推送最新值，本次跳过。"); log(""); finish(); return; }
   if (ok2) {
     var _pk = pushedKey || ptKey;   // 实际落地到青龙的 key（并发补推时可能是比本次捕获更新的 key）
     setLastKey(pin, _pk);
+    setPushed(pin, _pk);
     log("- 推送结果：成功（" + msg + "）");
-    log("- 已发送「CK获取并推送青龙成功」通知（pt_key 已打码）。");
-    notify("CK获取并推送青龙成功", "pt_pin: " + pin, "CK获取成功，已推送青龙 | " + msg + " | pt_key: " + maskKey(_pk));
+    var _isNewCK = !preLast || _pk !== preLast;   // 相对推送前基准：是否真的换了 CK
+    if (_isNewCK) {
+      log("- 已发送「CK获取并推送青龙成功」通知（pt_key 已打码）。");
+      notify("CK获取并推送青龙成功", "pt_pin: " + pin, "CK获取成功，已推送青龙 | " + msg + " | pt_key: " + maskKey(_pk));
+    } else {
+      log("- CK 与上次相同：已按设置强制推送刷新青龙（同值不重复通知，避免刷屏）。");
+    }
     // 二次复核：重新拉取青龙确认最新 pt_key 已落地，消除“日志失败但青龙已更新”的歧义
     getToken("复核取token", function (e, tok) {
       if (e) { log("- 二次复核：取 token 失败（" + e + "），无法确认；以青龙侧实际为准。"); log(""); return finish(); }
@@ -423,27 +436,38 @@ function onPushed(pin, ptKey, ok2, msg, skip, pushedKey) {
   }
 }
 
-// 推送决策：京东 App 打开会稳定触发多次捕获。若为「新 key」立即推送；
-// 若为「未变化」（可能是刷新前的旧 key 或稳态同值），进入缓冲窗口，等待后续捕获，
-// 仅当窗口内出现更新的 key（cap != lastKey）才补推，避免把旧 key 推上去、也避免重复推送。
+// 推送决策（推送=开时的两种情况；推送=关的两种情况在 run() 内直接提示不推送）：
+//  不同CK → 立即推送（并通知）；
+//  相同CK → 先进入缓冲窗口等待后续捕获：窗口内出现更新 key 则改推最新值（按不同CK处理），
+//           窗口内无更新则按设置强制推送当前值（相同CK也推；同值不重复通知，30s 内刚推过则跳过）。
 function decidePush(pin, ptKey) {
   var cap = getCap(pin);
   if (!cap) { finish(); return; }
   var changed = (cap !== getLastKey(pin));
   if (changed) {
-    log("- 检测到新 key，立即推送（单飞锁+最新值优先兜底）。");
-    pushLatest(pin, function (ok2, msg, skip, pk) { onPushed(pin, ptKey, ok2, msg, skip, pk); });
+    log("- 获取到不同京东CK，根据设置开始推送青龙面板……");
+    var _pre = getLastKey(pin);
+    pushLatest(pin, function (ok2, msg, skip, pk) { onPushed(pin, ptKey, ok2, msg, skip, pk, _pre); });
   } else {
-    log("- 与上次推送相同，进入 " + (DEBOUNCE_MS / 1000) + "s 缓冲：等待后续捕获，避免推送刷新前的旧 key。");
+    log("- 获取到相同京东CK，进入 " + (DEBOUNCE_MS / 1000) + "s 缓冲：等待后续捕获，若出现更新 key 则改推最新值，避免把刷新前的旧 key 推上去。");
     setTimeout(function () {
       var cap2 = getCap(pin);
-      if (cap2 && cap2 !== getLastKey(pin)) {
-        log("- 缓冲期内捕获到新 key，补推最新值。");
-        pushLatest(pin, function (ok2, msg, skip, pk) { onPushed(pin, ptKey, ok2, msg, skip, pk); });
+      var changed2 = !!(cap2 && cap2 !== getLastKey(pin));
+      var _pre2 = getLastKey(pin);
+      if (changed2) {
+        log("- 缓冲期内出现更新 key：获取到不同京东CK，根据设置开始推送青龙面板……");
+        pushLatest(pin, function (ok2, msg, skip, pk) { onPushed(pin, ptKey, ok2, msg, skip, pk, _pre2); });
       } else {
-        log("- 缓冲期无新 key，无需推送（青龙已为该值，避免冗余）。");
-        log("");
-        finish();
+        // 窗口内无更新：相同CK按设置强制推送；若该 key 刚推送成功过(PUSH_GAP 内)则无需重复往返
+        var _pd = getPushed(pin);
+        if (cap2 && _pd.key === cap2 && Date.now() - _pd.t < PUSH_GAP) {
+          log("- 相同CK已于 " + (PUSH_GAP / 1000) + " 秒内推送成功，无需重复推送。");
+          log("");
+          finish();
+          return;
+        }
+        log("- 获取到相同京东CK，根据设置开始推送青龙面板……（强制推送）");
+        pushLatest(pin, function (ok2, msg, skip, pk) { onPushed(pin, ptKey, ok2, msg, skip, pk, _pre2); });
       }
     }, DEBOUNCE_MS);
   }
@@ -477,27 +501,26 @@ function run() {
 
   // 1、获取CK
   log("1、开始获取CK。");
-  log(_changed ? "- CK已改变" : "- 获取CK成功，与上次相同");
   log("- CK值：pt_key=" + ptKey + ",pt_pin=" + ptPin + "。");
   log("");
 
-  // （已移除「每次捕获」的「获取ck成功」通知：改为仅在推送成功/失败时通知，避免多次触发刷屏）
+  // （已移除「每次捕获」的「获取ck成功」通知：改为仅在推送成功且CK变化/推送失败时通知，避免多次触发刷屏）
 
   // 先判开关：推送青龙=关 → 仅抓取，不进入任何推送/限流逻辑（避免误报“限流”，也不污染节流计时）
   if (!ENABLE_PUSH) {
     log("2、推送CK至青龙面板。");
-    log("- 根据设置「推送青龙=关」，仅抓取 CK 不推送青龙。");
+    log("- " + (_changed ? "获取到不同京东CK" : "获取到相同京东CK") + "，根据设置不推送青龙面板。");
     log("");
     finish(); return;
   }
 
   // 推送节流：同 key 在 PUSH_GAP(30s) 内只尝试一次（压突发刷屏，也防失败高频重试）
-  // 仅在真正推送时才做限频，且节流计时只在此时写入（开启「推送青龙」即强制推送，受 30s 限频保护）
+  // 仅在真正推送时才做限频，且节流计时只在此时写入（开启「推送青龙」即对每次捕获推送，受 30s 限频保护）
   var _lastTryKey = sGet(K_TRYKEY + ptPin);
   var _lastTryT = Number(sGet(K_TRY) || "0");
   if (_lastTryKey === ptKey && Date.now() - _lastTryT < PUSH_GAP) {
     log("2、推送CK至青龙面板。");
-    log("- 推送节流（同key " + (PUSH_GAP / 1000) + "秒内已尝试，跳过本次；限频后仍将强制推送）。");
+    log("- 推送节流：同 key " + (PUSH_GAP / 1000) + " 秒内已尝试，本次跳过（先到实例负责推送，值不变无需重复推）。");
     log("");
     finish(); return;
   }
@@ -529,7 +552,7 @@ function run() {
   }
 
   log("2、推送CK至青龙面板。");
-  log("- 开始推送（目标=" + hostOf(QL_URL) + " | 出站=" + QL_HTTP_NODE + (QL_ACCESS_ID ? " | CloudflareAccess=开" : " | CloudflareAccess=关") + "）");
+  log("- 目标=" + hostOf(QL_URL) + " | 出站=" + QL_HTTP_NODE + (QL_ACCESS_ID ? " | CloudflareAccess=开" : " | CloudflareAccess=关"));
   decidePush(ptPin, ptKey);
   return;
 }
