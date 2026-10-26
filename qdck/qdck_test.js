@@ -597,6 +597,32 @@ function check(desc, cond) {
     check("空任务列表不触发且不误报成功", r23c.ql.triggered.length === 0 && r23c.logs.some(l => l.indexOf("未找到命令包含") >= 0));
   }
 
+  // ===== 场景24：同一 uid 连续两次捕获（C1旧 → C2新，间隔 < 缓冲窗口）→ 最终落地为最新 C2 =====
+  console.log("\n===== 场景24：爆发捕获只推最新 cookie =====");
+  {
+    const sharedQL24 = makeQL({ envs: [{ id: 130, name: "QDREADER_COOKIE", value: "{}", status: 0, remarks: "" }] });
+    const sharedStore24 = {};
+    const ckC1 = makeCookie("24024");                 // 第一次捕获（稍旧）
+    const ckC2 = makeCookie("24024", "extra=newest"); // 第二次捕获（最新，同一 uid）
+    // 两个实例几乎同时启动、共享 store 与青龙 mock，模拟 App 打开瞬间连续触发 getlogininfo
+    const pC1 = runScenario("burst-c1", {
+      argument: ARG, request: { headers: { Cookie: ckC1 } },
+      qlState: sharedQL24.state, qlRoutes: sharedQL24.routes, store: sharedStore24, wait: 12000
+    });
+    const pC2 = runScenario("burst-c2", {
+      argument: ARG, request: { headers: { Cookie: ckC2 } },
+      qlState: sharedQL24.state, qlRoutes: sharedQL24.routes, store: sharedStore24, wait: 12000
+    });
+    const rc1 = await pC1, rc2 = await pC2;
+    const allLogs24 = rc1.logs.join("\n") + "\n" + rc2.logs.join("\n");
+    const m24 = (() => { try { return JSON.parse(sharedQL24.state.envs.find(e => e.id === 130).value); } catch (e) { return null; } })();
+    check("统一走缓冲窗口（日志含「进入 …s 缓冲」）", allLogs24.indexOf("进入") >= 0 && allLogs24.indexOf("缓冲") >= 0);
+    check("最终落地的是最新捕获 C2（含 extra=newest）", m24 && m24["24024"] === ckC2);
+    check("第一次捕获 C1（旧）未被落地", m24 && m24["24024"] !== ckC1);
+    check("变量只有一对键值", m24 && Object.keys(m24).length === 1);
+    check("发送一次成功通知", rc1.notifs.concat(rc2.notifs).filter(n => n.title === "起点Cookie推送青龙成功").length === 1);
+  }
+
   console.log("\n========================================");
   console.log("结果：" + pass + " 通过 / " + fail + " 失败");
   process.exit(fail > 0 ? 1 : 0);

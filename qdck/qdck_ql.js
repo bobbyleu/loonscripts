@@ -28,7 +28,7 @@ var WHITELIST_MODE = false;                   // true=仅白名单内 uid 写入
 var UID_WHITELIST = [];                       // 白名单 uid，如 ["123456","789012"]
 var PUSH_GAP = 30 * 1000;                     // 同一 uid 两次推送尝试的最小间隔(防高频)：突发多次捕获只推一次，也防失败高频重试
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
-var VERSION = "V1.09";
+var VERSION = "V1.10";
 var QL_ENV_NAME = "QDREADER_COOKIE";          // 青龙 Cookie 环境变量名（固定值）
 var QL_TASK_KEY = "qdreader";                 // 青龙签到任务匹配关键词（固定值：任务命令含 qdreader 即命中，如 task qdreader.js）
 var UID_SPLIT_INDEX = 11;                     // base64(QDHeader).split('|') 中 uid 的下标（与主脚本一致）
@@ -837,42 +837,40 @@ function onPushed(uid, cookie, ok2, msg, skip, pushedCookie, preLast, lastPushed
   }
 }
 
-// 推送决策（推送=开时的两种情况；推送=关的两种情况在 run() 内直接提示不推送）：
-//  不同cookie → 立即推送（并通知）；
-//  相同cookie → 先进入缓冲窗口等待后续捕获：窗口内出现更新 cookie 则改推最新值，
-//              窗口内无更新则按设置强制推送当前值（相同cookie也推；同值不重复通知，30s 内刚推过则跳过）。
+// 推送决策（推送=开时）：统一先进入 DEBOUNCE_MS 缓冲窗口，再读最新捕获决定推送：
+//  - 窗口内出现更新 cookie（cap != 已推送基准）→ 推送最新值（并通知）；
+//  - 窗口内无更新（cap == 已推送基准）→ 按设置强制推送当前值；若该 cookie 刚推送成功过(PUSH_GAP 内)则跳过。
+// 设计要点：不再"不同 cookie 立即推送"，而是等一个缓冲窗口收集同一轮多次 getlogininfo 的最后一次，
+// 确保推出的是最新 cookie（App 打开/刷新时常连续触发，第一次的可能不是最新）。
 function decidePush(uid, cookie) {
   var cap = getCap(uid);
   if (!cap) { finish(); return; }
-  var changed = (cap !== getLastKey(uid));
-  if (changed) {
-    log("- 获取到不同起点Cookie，根据设置开始推送青龙面板……");
-    var _pre = getLastKey(uid);
-    pushLatest(uid, false, function (ok2, msg, skip, pk, lp) { onPushed(uid, cookie, ok2, msg, skip, pk, _pre, lp); });
-  } else {
-    log("- 获取到相同起点Cookie，进入 " + (DEBOUNCE_MS / 1000) + "s 缓冲：等待后续捕获，若出现更新 cookie 则改推最新值，避免把刷新前的旧 cookie 推上去。");
-    setTimeout(function () {
-      var cap2 = getCap(uid);
-      var changed2 = !!(cap2 && cap2 !== getLastKey(uid));
-      var _pre2 = getLastKey(uid);
-      if (changed2) {
-        log("- 缓冲期内出现更新 cookie：获取到不同起点Cookie，根据设置开始推送青龙面板……");
-        pushLatest(uid, false, function (ok2, msg, skip, pk, lp) { onPushed(uid, cookie, ok2, msg, skip, pk, _pre2, lp); });
-      } else {
-        // 窗口内无更新：相同cookie按设置强制推送；若该 cookie 刚推送成功过(PUSH_GAP 内)则无需重复往返
-        var _pd = getPushed(uid);
-        if (cap2 && _pd.key === cap2 && Date.now() - _pd.t < PUSH_GAP) {
-          log("- 获取到相同起点Cookie，" + (PUSH_GAP / 1000) + " 秒内已推送成功，无需重复推送。");
-          log("- 通知：未发送（该 cookie 刚推送成功过，无变化）。");
-          log("");
-          finish();
-          return;
-        }
-        log("- 获取到相同起点Cookie，根据设置开始推送青龙面板……（强制推送）");
-        pushLatest(uid, true, function (ok2, msg, skip, pk, lp) { onPushed(uid, cookie, ok2, msg, skip, pk, _pre2, lp); });
+  var pre = getLastKey(uid);
+  // 统一缓冲窗口：无论「不同 cookie」还是「相同 cookie」都先等 DEBOUNCE_MS，
+  // 让同一轮「打开App/刷新」产生的多次 getlogininfo 都落进来；窗口结束时再读最新 cap 推送，
+  // 保证推出的是缓冲窗口内最后捕获的 cookie（最新获胜），避免第一次推送就用了非最新的 cookie。
+  log("- 获取起点Cookie，进入 " + (DEBOUNCE_MS / 1000) + "s 缓冲：等待后续捕获，确保推送的是最新 cookie。");
+  setTimeout(function () {
+    var cap2 = getCap(uid);                 // 窗口末再取最新捕获
+    var changed2 = !!(cap2 && cap2 !== getLastKey(uid));
+    var pre2 = getLastKey(uid);
+    if (changed2) {
+      log("- 缓冲期内已确定最新 cookie：获取到不同起点Cookie，根据设置开始推送青龙面板……");
+      pushLatest(uid, false, function (ok2, msg, skip, pk, lp) { onPushed(uid, cap2, ok2, msg, skip, pk, pre2, lp); });
+    } else {
+      // 窗口内无更新：相同cookie按设置强制推送；若该 cookie 刚推送成功过(PUSH_GAP 内)则无需重复往返
+      var _pd = getPushed(uid);
+      if (cap2 && _pd.key === cap2 && Date.now() - _pd.t < PUSH_GAP) {
+        log("- 获取到相同起点Cookie，" + (PUSH_GAP / 1000) + " 秒内已推送成功，无需重复推送。");
+        log("- 通知：未发送（该 cookie 刚推送成功过，无变化）。");
+        log("");
+        finish();
+        return;
       }
-    }, DEBOUNCE_MS);
-  }
+      log("- 获取到相同起点Cookie，根据设置开始推送青龙面板……（强制推送）");
+      pushLatest(uid, true, function (ok2, msg, skip, pk, lp) { onPushed(uid, cap2, ok2, msg, skip, pk, pre2, lp); });
+    }
+  }, DEBOUNCE_MS);
 }
 
 function run() {
