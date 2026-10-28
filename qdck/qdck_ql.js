@@ -1,7 +1,7 @@
 // 起点Cookie自动推送青龙面板
 // 拦截 h5.if.qidian.com 上携带登录 Cookie 的 getlogininfo 请求，捕获完整 Cookie，
-// 按 uid 覆盖写入青龙 QDREADER_COOKIE（JSON 单键值对 {"uid":"完整cookie"}）：
-// 获取到新 Cookie 即整体覆盖，变量永远只保留最新捕获的一个账号（qdreader.js 一次运行覆盖全部账号，单账号即全量）。
+// 按 uid 合并写入青龙 QDREADER_COOKIE（JSON Map {"uid1":"cookie1","uid2":"cookie2",...}）：
+// 同 uid 覆盖该键、新 uid 追加新键，多账号各居其位、互不覆盖（qdreader.js 一次运行会遍历所有账号）。
 // 推送成功后可按开关触发青龙起点签到任务立即执行（PUT /open/crons/run）。
 //
 // 抓取逻辑与 qdreader.js 主脚本保持一致（已从其源码中提取核实）：
@@ -28,7 +28,7 @@ var WHITELIST_MODE = false;                   // true=仅白名单内 uid 写入
 var UID_WHITELIST = [];                       // 白名单 uid，如 ["123456","789012"]
 var PUSH_GAP = 30 * 1000;                     // 同一 uid 两次推送尝试的最小间隔(防高频)：突发多次捕获只推一次，也防失败高频重试
 var NOTIFY_FAIL_GAP = 10 * 60 * 1000;         // 「推送失败」通知最小间隔(10min)
-var VERSION = "V1.10";
+var VERSION = "V1.11";
 var QL_ENV_NAME = "QDREADER_COOKIE";          // 青龙 Cookie 环境变量名（固定值）
 var QL_TASK_KEY = "qdreader";                 // 青龙签到任务匹配关键词（固定值：任务命令含 qdreader 即命中，如 task qdreader.js）
 var UID_SPLIT_INDEX = 11;                     // base64(QDHeader).split('|') 中 uid 的下标（与主脚本一致）
@@ -548,10 +548,11 @@ function enableEnv(label, t, id) {
   qlReq("PUT", "/open/envs/enable", [id], t, function (e) { if (e) log("[" + (label || "启用环境") + "] 启用失败 " + e); }, 1, label || "启用环境");
 }
 
-// ========== 覆盖推送（单账号语义） ==========
-// 变量值永远是一对键值 {"<uid>":"cookie"}：获取到新 cookie 即整体覆盖写入，
-// 青龙里只保留最新捕获的一个账号（qdreader.js 一次运行覆盖全部账号，单账号即全量）。
-// 变量不存在时新建；现值无论是其他账号还是手填的非 JSON 值，都被覆盖——日志说明被替换掉的内容，不做备份。
+// ========== 多账号合并推送 ==========
+// 变量值是 JSON Map {"uid1":"cookie1","uid2":"cookie2",...}：
+//  - 同 uid → 覆盖该键（只更新该账号 cookie）；新 uid → 追加新键（保留其他账号）；
+//  - 变量不存在时新建；现值是手填的非 JSON 原始值时，原值备份到 <uid>_backup 键后写入，不清空。
+// qdreader.js 一次运行会遍历所有账号，多账号模式让每个账号的 cookie 在青龙里各居其位、互不覆盖。
 function pushCookie(uid, cookie, cb) {
   getToken("取token", function (e, tok) {
     if (e) return cb(false, "token失败: " + e);
@@ -560,39 +561,46 @@ function pushCookie(uid, cookie, cb) {
       var tgt = null;
       for (var i = 0; i < envs.length; i++) { if (envs[i] && envs[i].name === QL_ENV_NAME) { tgt = envs[i]; break; } }
 
-      var single = {};
-      single[uid] = cookie;
-      var nv = JSON.stringify(single);
-
       if (!tgt) {
         // 青龙还没有该变量：新建，value 即 {"<uid>":"cookie"}
-        return newEnv("新建环境", tok, nv, function (e3, nid) {
+        var nv0 = {};
+        nv0[uid] = cookie;
+        var s0 = JSON.stringify(nv0);
+        return newEnv("新建环境", tok, s0, function (e3, nid) {
           if (e3) return cb(false, "新建失败: " + e3);
           if (nid) enableEnv("启用环境", tok, nid);
-          cb(true, "已新建 " + QL_ENV_NAME + " 并写入 uid=" + uid);
+          cb(true, "已新建 " + QL_ENV_NAME + " 并写入账号 uid=" + uid + "（共 1 个账号键）");
         });
       }
 
-      // 覆盖写：解析旧值只为在日志里说明被替换掉了什么，不参与合并
+      // 合并写：解析现值 Map，叠加本次 uid（覆盖或新增），其他账号原样保留
       var raw = String(tgt.value || "");
-      var oldUids = null, badValue = false;
+      var map = null, badValue = false;
       try {
         var om = JSON.parse(raw);
-        if (om && typeof om === "object" && !Array.isArray(om)) oldUids = Object.keys(om);
+        if (om && typeof om === "object" && !Array.isArray(om)) map = om;
         else badValue = true;
       } catch (e4) { badValue = true; }
+
+      var isNew = false;
       if (badValue) {
-        log("⚠️ 青龙 " + QL_ENV_NAME + " 现值不是 JSON Map（可能是手填的原始 cookie），按覆盖语义替换为 uid=" + uid + "（变量只保留最新捕获的账号，不做备份）。");
-      } else if (oldUids && oldUids.length === 1 && oldUids[0] === uid) {
-        // 同账号刷新：常规覆盖，无需告警
-      } else if (oldUids && oldUids.length) {
-        log("⚠️ 青龙 " + QL_ENV_NAME + " 现值含账号 uid=" + oldUids.join(",") + "，按覆盖语义替换为 uid=" + uid + "（变量只保留最新捕获的账号）。");
+        // 手填非 JSON 现值：备份到 <uid>_backup 后再写入，不丢失原值
+        var bu = {};
+        bu[uid + "_backup"] = raw;
+        map = bu;
+        isNew = true;
+        log("⚠️ 青龙 " + QL_ENV_NAME + " 现值不是 JSON Map（可能是手填的原始 cookie），已备份到 " + uid + "_backup 键后再写入 uid=" + uid + "（不清空原值）。");
+      } else {
+        if (map[uid] === undefined) isNew = true;  // 新账号 → 新增；同账号 → 覆盖（isNew=false）
       }
+      map[uid] = cookie;
+      var nv = JSON.stringify(map);
 
       updEnv("更新变量", tok, tgt.id, nv, tgt.remarks, function (e5) {
         if (e5) return cb(false, "更新失败: " + e5);
         if (tgt.status !== undefined && tgt.status !== null && tgt.status !== 0) enableEnv("启用环境", tok, tgt.id);
-        cb(true, "已覆盖写入 uid=" + uid + "（变量只保留该账号）");
+        var accountKeys = Object.keys(map).filter(function (k) { return k.indexOf("_backup") < 0; }).length;
+        cb(true, (isNew ? "已新增账号" : "已更新账号") + " uid=" + uid + "（变量共 " + accountKeys + " 个账号键）");
       });
     });
   });
@@ -680,12 +688,12 @@ function triggerTask(t, cb) {
   }, 1, "查任务");
 }
 
-// ========== 单飞锁 + 最新值优先 ==========
-// 变量只保留一个账号，推送仍串行执行：
+// ========== 单飞锁 + 多账号串行 ==========
+// 多账号模式下变量是 JSON Map，各账号互不覆盖，推送仍串行执行：
 //  - 全局锁保证同一时刻只有一个实例在推送（查环境/写变量/同步开关/触发任务不交错）；
 //  - 推送期间新捕获的 cookie 记入 K_CAP_<uid>，持锁实例每轮结束后扫描注册表，
-//    把后续捕获的账号依次覆盖写入，最多 MAX_ROUNDS 轮；
-//  - 最终写进青龙的是「最后捕获的账号」的 cookie（覆盖语义，最新获胜）。
+//    把后续捕获的账号依次合并写入（同 uid 覆盖、新 uid 新增），最多 MAX_ROUNDS 轮；
+//  - 最终写进青龙的是合并后的完整 Map（每个账号各自最新获胜）。
 function getBusy() { return Number(sGet(K_BUSY) || "0"); }
 function setBusy() { sSet(K_BUSY, String(Date.now())); }
 function clearBusy() { sSet(K_BUSY, "0"); }
@@ -769,7 +777,7 @@ function finishWithSwitchSync() {
 // 推送结果回调：成功/失败的统一处理（含触发签到、二次复核、失败限频通知）
 // preLast：本次推送前的「上次已推送 cookie」基准；仅当实际落地的 cookie 与它不同（=真的换了 cookie）才发成功通知。
 // lastPushed：最后成功落地的 {uid, cookie}（并发续推时可能是比本次捕获更新的账号）；
-//             二次复核以它为准——覆盖语义下变量只留一个账号，复核触发账号会误报未落地。
+//             二次复核以它为准——多账号模式下变量保留所有账号，复核该账号即准确。
 function onPushed(uid, cookie, ok2, msg, skip, pushedCookie, preLast, lastPushed) {
   if (skip) { log("- 并发突发：已由其他实例推送最新值，本次跳过。"); log("- 通知：未发送（由持锁实例负责推送与通知）。"); log(""); finish(); return; }
   if (ok2) {
@@ -786,7 +794,7 @@ function onPushed(uid, cookie, ok2, msg, skip, pushedCookie, preLast, lastPushed
       log("- 已按设置强制推送刷新青龙；通知：未发送（青龙已为该 cookie，同值不重复提醒，避免刷屏）。");
     }
     // 二次复核：重新拉取青龙确认最新 cookie 已落地，消除“日志失败但青龙已更新”的歧义
-    // 覆盖语义下以「最后成功落地的账号」为复核对象（变量里只会有它）
+    // 多账号模式下以「最后成功落地的账号」为复核对象（变量里保留所有账号，复核该账号即准确）
     var _vu = (lastPushed && lastPushed.uid) || uid;
     var _vc = (lastPushed && lastPushed.cookie) || _ck;
     getToken("复核取token", function (e, tok) {
